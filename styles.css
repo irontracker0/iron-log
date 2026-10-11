@@ -79,3 +79,40 @@ h2 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 #more-sheet a:active { background: var(--accent-soft); }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- Stage 3: workout logging ---------- */
+.muted { color: var(--muted); }
+.section { margin: 22px 0 10px; }
+.field { display: block; color: var(--muted); font-size: 14px; margin-bottom: 12px; }
+.field input, .field textarea, .search, .note {
+  display: block; width: 100%; margin-top: 6px; padding: 12px 14px; min-height: 48px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 12px;
+  font: inherit; font-size: 17px; color-scheme: dark;
+}
+.field textarea { resize: vertical; }
+.search { margin: 0 0 12px; }
+input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+.btn.wide { display: flex; width: 100%; margin: 0 0 12px; }
+.btn.danger { color: #f0a0a0; border-color: rgba(240, 120, 120, 0.35); background: transparent; margin-top: 18px; }
+.btn-row { display: flex; flex-wrap: wrap; margin-top: 8px; }
+.topbar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.item { display: flex; width: 100%; justify-content: space-between; align-items: center; text-align: left; font: inherit; color: var(--text); cursor: pointer; }
+.ex-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.ex-head h2 { margin-bottom: 4px; }
+.prev { color: var(--muted); font-size: 14.5px; margin: 0 0 12px; }
+.badge { font-size: 12px; font-weight: 500; color: var(--accent); background: var(--accent-soft); border-radius: 8px; padding: 2px 8px; vertical-align: middle; }
+.set-head, .set { display: grid; grid-template-columns: 26px 1fr 1fr 44px 44px; gap: 8px; align-items: center; }
+.set-head { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+.set { margin-bottom: 8px; }
+.set-n { color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+.set .num { width: 100%; min-height: 48px; padding: 0 12px; text-align: center; font: inherit; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 12px; }
+.set .note { grid-column: 2 / -1; margin: 0; min-height: 44px; font-size: 16px; }
+input.bad { border-color: #e07070 !important; }
+.icon-btn { width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; background: none; border: 0; color: var(--muted); cursor: pointer; border-radius: 12px; }
+.icon-btn:active { background: var(--accent-soft); color: var(--accent); }
+.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pick { display: block; width: 100%; text-align: left; padding: 14px 4px; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--text); font: inherit; font-size: 17px; cursor: pointer; }
+.pick:active { background: var(--accent-soft); }
+.check { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 15px; margin: 0 0 6px; }
+.check input { width: 22px; height: 22px; accent-color: var(--accent); }
