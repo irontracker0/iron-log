@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0f0e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="IRON LOG">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="styles.css">
+<title>IRON LOG</title>
+</head>
+<body>
+<main id="view" tabindex="-1"></main>
+
+<div id="more-backdrop" hidden></div>
+<div id="more-sheet" hidden role="dialog" aria-label="More pages">
+  <a href="#/history">Workout History</a>
+  <a href="#/plan">My Plan</a>
+  <a href="#/settings">Settings and Backups</a>
+</div>
+
+<nav id="tabbar" aria-label="Main navigation"></nav>
+<script src="app.js"></script>
+</body>
+</html>
