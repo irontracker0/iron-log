@@ -90,7 +90,7 @@
   }
 
   /* ================= Screen state (not part of your saved data) ================= */
-  var ui = { activeId: null, picking: false, noteOpen: {}, search: '' };
+  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null };
   try { var u = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); if (u.activeId) ui.activeId = u.activeId; } catch (e) {}
   function saveUi() { try { localStorage.setItem(UI_KEY, JSON.stringify({ activeId: ui.activeId })); } catch (e) {} }
   function activeWorkout() {
@@ -134,6 +134,7 @@
         html += '<button class="card item" data-act="open" data-id="' + esc(w.id) + '"><span><strong>' + fmtDate(w.date) + '</strong><br>' +
           '<span class="muted">' + w.exercises.length + ' exercise' + (w.exercises.length === 1 ? '' : 's') + ', ' + sets + ' set' + (sets === 1 ? '' : 's') + '</span></span><span class="muted">Edit</span></button>';
       });
+      html += '<a class="btn wide" href="#/history">View full history</a>';
     }
     return html;
   }
@@ -202,6 +203,103 @@
     return html;
   }
 
+
+  /* ---------- Workout History ---------- */
+  function monthLabel(iso) {
+    var p = iso.split('-');
+    return new Date(+p[0], +p[1] - 1, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  }
+  function histActive() { var h = ui.hist; return !!(h.q.trim() || h.ex || h.from || h.to); }
+
+  function filteredWorkouts() {
+    var h = ui.hist, q = h.q.trim().toLowerCase();
+    return db.workouts.slice().sort(byNewest).filter(function (w) {
+      if (h.from && w.date < h.from) return false;
+      if (h.to && w.date > h.to) return false;
+      if (h.ex && !w.exercises.some(function (x) { return x.exerciseId === h.ex; })) return false;
+      if (q) {
+        var hit = (w.notes || '').toLowerCase().indexOf(q) > -1 || w.exercises.some(function (x) {
+          return exName(x.exerciseId).toLowerCase().indexOf(q) > -1 ||
+            x.sets.some(function (s) { return (s.note || '').toLowerCase().indexOf(q) > -1; });
+        });
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }
+
+  function workoutSummary(w) {
+    var h = ui.hist;
+    if (!w.exercises.length) return '<span class="muted">No exercises</span>';
+    if (h.ex) { // reviewing one exercise: show its sets for every session
+      return w.exercises.filter(function (x) { return x.exerciseId === h.ex; }).map(function (x) {
+        var bw = isBW(x.exerciseId), done = x.sets.filter(isDone);
+        return '<span class="muted">' + (done.length ? done.map(function (s) { return fmtSet(s, bw); }).join(', ') : 'No finished sets') + '</span>';
+      }).join('<br>');
+    }
+    return '<span class="muted">' + w.exercises.map(function (x) {
+      return esc(exName(x.exerciseId)) + ' (' + x.sets.length + ')';
+    }).join(', ') + '</span>';
+  }
+
+  function renderHistoryResults() {
+    if (!db.workouts.length) {
+      return '<div class="card empty-card"><h2>No workouts yet</h2><p>Workouts you log will show up here.</p><a class="btn primary" href="#/log">Log workout</a></div>';
+    }
+    var list = filteredWorkouts();
+    if (!list.length) return '<div class="card empty-card"><p style="margin:0">No workouts match these filters.</p></div>';
+    var html = '<p class="muted count">' + list.length + ' workout' + (list.length === 1 ? '' : 's') + '</p>', month = '';
+    list.forEach(function (w) {
+      var m = monthLabel(w.date);
+      if (m !== month) { month = m; html += '<h2 class="section">' + m + '</h2>'; }
+      html += '<button class="card item" data-act="hopen" data-id="' + esc(w.id) + '"><span class="grow"><strong>' + fmtDate(w.date) + '</strong><br>' +
+        workoutSummary(w) + '</span><span class="muted">Open</span></button>';
+    });
+    return html;
+  }
+
+  function renderHistoryList() {
+    var h = ui.hist;
+    var used = {};
+    db.workouts.forEach(function (w) { w.exercises.forEach(function (x) { used[x.exerciseId] = true; }); });
+    var opts = db.exercises.filter(function (e) { return used[e.id]; })
+      .sort(function (a, b) { return a.name.localeCompare(b.name); })
+      .map(function (e) { return '<option value="' + esc(e.id) + '"' + (h.ex === e.id ? ' selected' : '') + '>' + esc(e.name) + '</option>'; }).join('');
+    return header('Workout History', 'Browse, search and edit past workouts') +
+      '<div class="card">' +
+      '<input class="search" type="search" placeholder="Search exercises or notes" autocomplete="off" value="' + esc(h.q) + '" data-in="hq">' +
+      '<label class="field">Exercise<select data-in="hex"><option value="">All exercises</option>' + opts + '</select></label>' +
+      '<div class="two"><label class="field">From<input type="date" value="' + esc(h.from) + '" data-in="hfrom"></label>' +
+      '<label class="field">To<input type="date" value="' + esc(h.to) + '" data-in="hto"></label></div>' +
+      (histActive() ? '<button class="btn" data-act="hclear">Clear filters</button>' : '') + '</div>' +
+      '<div id="hist-results">' + renderHistoryResults() + '</div>';
+  }
+
+  function renderHistoryDetail(w) {
+    var sets = 0; w.exercises.forEach(function (x) { sets += x.sets.length; });
+    var html = '<div class="topbar left"><button class="btn" data-act="hback">Back</button></div>' +
+      header(fmtDate(w.date), w.exercises.length + ' exercise' + (w.exercises.length === 1 ? '' : 's') + ', ' + sets + ' set' + (sets === 1 ? '' : 's'));
+    if ((w.notes || '').trim()) html += '<div class="card"><h2>Notes</h2><p class="notes">' + esc(w.notes) + '</p></div>';
+    if (!w.exercises.length) html += '<div class="card empty-card"><p style="margin:0">No exercises in this workout.</p></div>';
+    w.exercises.forEach(function (we) {
+      var bw = isBW(we.exerciseId);
+      html += '<div class="card"><h2>' + esc(exName(we.exerciseId)) + (bw ? ' <span class="badge">Bodyweight</span>' : '') + '</h2>';
+      if (!we.sets.length) html += '<p class="muted" style="margin:0">No sets recorded.</p>';
+      we.sets.forEach(function (s, i) {
+        html += '<div class="row"><span>Set ' + (i + 1) + '</span><span>' + (isDone(s) ? fmtSet(s, bw) : '<span class="muted">Incomplete</span>') + '</span></div>' +
+          (s.note ? '<div class="snote">' + esc(s.note) + '</div>' : '');
+      });
+      html += '</div>';
+    });
+    return html + '<button class="btn primary wide" data-act="hedit">Edit workout</button><button class="btn danger wide" data-act="hdel">Delete workout</button>';
+  }
+
+  function renderHistory() {
+    var w = ui.histOpen ? find(db.workouts, function (x) { return x.id === ui.histOpen; }) : null;
+    if (!w) ui.histOpen = null;
+    return w ? renderHistoryDetail(w) : renderHistoryList();
+  }
+
   var PAGES = {
     dashboard: function () {
       var n = loggedWorkouts().length;
@@ -218,7 +316,7 @@
     log: function () { var w = activeWorkout(); return w ? renderEditor(w) : renderLogHome(); },
     strength: function () { return comingSoon('Strength Progress', 'Graphs, estimated 1RM and personal records', 'Stage 5', 'Graphs and records appear once you have logged workouts.'); },
     body: function () { return comingSoon('Body Progress', 'Weight, body fat and measurements', 'Stage 6', 'Measurement entry and graphs appear here.'); },
-    history: function () { return comingSoon('Workout History', 'Browse and edit past workouts', 'Stage 4', 'Past workouts will be listed here by date.'); },
+    history: function () { return renderHistory(); },
     plan: function () { return comingSoon('My Plan', 'Your personal workout notebook', 'Stage 7', 'A free-form editor with formatting and automatic saving.'); },
     settings: function () {
       var t = db.createdAt ? db.createdAt.slice(0, 10) : '-';
@@ -232,7 +330,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 3: workout logging</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 4: workout history</span></div>' +
         '</div>';
     }
   };
@@ -273,6 +371,7 @@
     var id = currentId();
     toggleSheet(false);
     ui.picking = false; ui.search = '';
+    if (id !== 'history' && !ui.returnTo) ui.histOpen = null;
     view.innerHTML = PAGES[id]();
     renderTabs(id);
     window.scrollTo(0, 0);
@@ -311,8 +410,10 @@
 
   function onClick(ev) {
     var btn = ev.target.closest('[data-act]');
-    if (!btn || currentId() !== 'log') return;
+    if (!btn) return;
     var act = btn.getAttribute('data-act');
+    if (currentId() === 'history') { onHistoryClick(act, btn); return; }
+    if (currentId() !== 'log') return;
     var w = activeWorkout();
     var we = w ? weOf(w, btn.getAttribute('data-we')) : null;
 
@@ -330,7 +431,8 @@
       if (!w.exercises.length && !(w.notes || '').trim()) { // do not keep empty workouts
         db.workouts = db.workouts.filter(function (x) { return x.id !== w.id; }); save();
       }
-      ui.activeId = null; saveUi(); ui.picking = false; rerender(); window.scrollTo(0, 0);
+      ui.activeId = null; saveUi(); ui.picking = false;
+      if (ui.returnTo) { ui.returnTo = null; location.hash = '#/history'; } else { rerender(); window.scrollTo(0, 0); }
     } else if (act === 'addex') {
       ui.picking = true; rerender();
     } else if (act === 'cancelpick') {
@@ -369,7 +471,22 @@
     } else if (act === 'delworkout') {
       if (!confirm('Delete this whole workout (' + fmtDate(w.date) + ')? This cannot be undone.')) return;
       db.workouts = db.workouts.filter(function (x) { return x.id !== w.id; }); save();
-      ui.activeId = null; saveUi(); rerender(); window.scrollTo(0, 0);
+      ui.activeId = null; saveUi();
+      if (ui.returnTo) { ui.returnTo = null; ui.histOpen = null; location.hash = '#/history'; } else { rerender(); window.scrollTo(0, 0); }
+    }
+  }
+
+  function onHistoryClick(act, btn) {
+    if (act === 'hopen') { ui.histOpen = btn.getAttribute('data-id'); rerender(); window.scrollTo(0, 0); }
+    else if (act === 'hback') { ui.histOpen = null; rerender(); window.scrollTo(0, 0); }
+    else if (act === 'hclear') { ui.hist = { q: '', ex: '', from: '', to: '' }; rerender(); }
+    else if (act === 'hedit' && ui.histOpen) { ui.activeId = ui.histOpen; saveUi(); ui.returnTo = 'history'; location.hash = '#/log'; }
+    else if (act === 'hdel' && ui.histOpen) {
+      var w = find(db.workouts, function (x) { return x.id === ui.histOpen; });
+      if (!w || !confirm('Delete this whole workout (' + fmtDate(w.date) + ')? This cannot be undone.')) return;
+      db.workouts = db.workouts.filter(function (x) { return x.id !== w.id; }); save();
+      if (ui.activeId === w.id) { ui.activeId = null; saveUi(); }
+      ui.histOpen = null; rerender(); window.scrollTo(0, 0);
     }
   }
 
@@ -390,7 +507,9 @@
 
   function onInput(ev) {
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
-    if (!kind || currentId() !== 'log') return;
+    if (!kind) return;
+    if (kind === 'hq' || kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
+    if (currentId() !== 'log') return;
 
     if (kind === 'exsearch') { ui.search = el.value; var l = document.getElementById('ex-list'); if (l) l.innerHTML = renderExList(el.value); return; }
 
@@ -412,8 +531,21 @@
     s[kind] = r.val; touch(w);
   }
 
+  function onHistoryFilter(kind, el) {
+    if (currentId() !== 'history') return;
+    var key = { hq: 'q', hex: 'ex', hfrom: 'from', hto: 'to' }[kind];
+    var v = el.value;
+    if ((key === 'from' || key === 'to') && v && !validDate(v)) return;
+    ui.hist[key] = v;
+    var r = document.getElementById('hist-results'); if (r) r.innerHTML = renderHistoryResults();
+    var clr = view.querySelector('[data-act="hclear"]');
+    if (histActive() && !clr) { var card = el.closest('.card'); if (card) card.insertAdjacentHTML('beforeend', '<button class="btn" data-act="hclear">Clear filters</button>'); }
+    if (!histActive() && clr) clr.remove();
+  }
+
   function onChange(ev) { // when leaving a field: put back the saved value if the typed one was invalid
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
+    if (kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
     if ((kind !== 'weight' && kind !== 'reps') || currentId() !== 'log') return;
     var w = activeWorkout(); if (!w) return;
     var we = weOf(w, el.getAttribute('data-we')); var s = we ? setOf(we, el.getAttribute('data-set')) : null;
