@@ -90,7 +90,7 @@
   }
 
   /* ================= Screen state (not part of your saved data) ================= */
-  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null };
+  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null } };
   try { var u = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); if (u.activeId) ui.activeId = u.activeId; } catch (e) {}
   function saveUi() { try { localStorage.setItem(UI_KEY, JSON.stringify({ activeId: ui.activeId })); } catch (e) {} }
   function activeWorkout() {
@@ -140,14 +140,15 @@
   }
 
   function renderSet(we, s, i, bw) {
-    var noteOpen = s.note || ui.noteOpen[s.id];
+    var noteOpen = s.note || s.max || ui.noteOpen[s.id];
     return '<div class="set">' +
       '<span class="set-n">' + (i + 1) + '</span>' +
       '<input class="num" inputmode="decimal" autocomplete="off" placeholder="' + (bw ? '+kg' : 'kg') + '" aria-label="Weight in kilograms" value="' + esc(num(s.weight)) + '" data-in="weight" data-we="' + we.id + '" data-set="' + s.id + '">' +
       '<input class="num" inputmode="numeric" autocomplete="off" placeholder="reps" aria-label="Repetitions" value="' + esc(num(s.reps)) + '" data-in="reps" data-we="' + we.id + '" data-set="' + s.id + '">' +
-      '<button class="icon-btn" aria-label="Set note" data-act="note" data-set="' + s.id + '">' + NOTE + '</button>' +
+      '<button class="icon-btn" aria-label="Set details" data-act="note" data-set="' + s.id + '">' + NOTE + '</button>' +
       '<button class="icon-btn" aria-label="Delete set" data-act="rmset" data-we="' + we.id + '" data-set="' + s.id + '">' + X + '</button>' +
-      (noteOpen ? '<input class="note" maxlength="200" placeholder="Set note (optional)" value="' + esc(s.note || '') + '" data-in="snote" data-we="' + we.id + '" data-set="' + s.id + '">' : '') +
+      (noteOpen ? '<div class="details"><input class="note" maxlength="200" placeholder="Set note (optional)" value="' + esc(s.note || '') + '" data-in="snote" data-we="' + we.id + '" data-set="' + s.id + '">' +
+        '<label class="check"><input type="checkbox" data-in="smax" data-we="' + we.id + '" data-set="' + s.id + '"' + (s.max ? ' checked' : '') + '> Real 1RM attempt (counts only with 1 rep)</label></div>' : '') +
       '</div>';
   }
 
@@ -200,6 +201,250 @@
     w.exercises.forEach(function (we) { html += renderExerciseCard(w, we); });
     html += ui.picking ? renderPicker() : '<button class="btn primary wide" data-act="addex">Add exercise</button>';
     html += '<button class="btn danger wide" data-act="delworkout">Delete this workout</button>';
+    return html;
+  }
+
+
+  /* ================= Strength analytics ================= */
+  // Estimated 1RM uses the Epley formula: weight x (1 + reps / 30).
+  // A set of exactly 1 rep uses its actual weight. Sets above 10 reps are not estimated.
+  var E1RM_MAX_REPS = 10;
+  function e1rm(weight, reps) {
+    if (weight == null || !(weight > 0) || reps == null || reps < 1 || reps > E1RM_MAX_REPS) return null;
+    if (reps === 1) return weight;
+    return Math.round(weight * (1 + reps / 30) * 10) / 10;
+  }
+  function isActual(s) { return !!s.max && s.reps === 1 && s.weight > 0; } // a real 1RM attempt you flagged
+  function fmtVal(n) { return String(Math.round(n * 10) / 10); }
+
+  function sessionsFor(exId) { // every workout that contains this exercise, oldest first
+    var out = [];
+    db.workouts.slice().sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return a.createdAt < b.createdAt ? -1 : 1;
+    }).forEach(function (w) {
+      w.exercises.forEach(function (x) {
+        if (x.exerciseId !== exId) return;
+        var sets = x.sets.filter(isDone);
+        if (sets.length) out.push({ w: w, date: w.date, sets: sets });
+      });
+    });
+    return out;
+  }
+
+  function sessionStats(se, bw) {
+    var st = { topW: null, topWSet: null, bestE: null, bestESet: null, topR: null, topRSet: null, actual: null, actualSet: null, vol: 0 };
+    se.sets.forEach(function (s) {
+      var w = s.weight > 0 ? s.weight : 0;
+      st.vol += w * s.reps;
+      if (w > 0 && (st.topW == null || w > st.topW || (w === st.topW && s.reps > st.topWSet.reps))) { st.topW = w; st.topWSet = s; }
+      var e = bw ? null : e1rm(s.weight, s.reps);
+      if (e != null && (st.bestE == null || e > st.bestE)) { st.bestE = e; st.bestESet = s; }
+      if (st.topR == null || s.reps > st.topR || (s.reps === st.topR && w > (st.topRSet.weight || 0))) { st.topR = s.reps; st.topRSet = s; }
+      if (isActual(s) && (st.actual == null || s.weight > st.actual)) { st.actual = s.weight; st.actualSet = s; }
+    });
+    st.bestSet = st.bestESet || st.topWSet || st.topRSet;
+    return st;
+  }
+
+  // Personal records are recomputed from your saved workouts every time, so edits and deletes always stay correct.
+  function exercisePRs(exId) {
+    var bw = isBW(exId), sess = sessionsFor(exId), ev = [];
+    var maxW = 0, maxE = 0, maxA = null, maxR = 0, repsAt = {};
+    sess.forEach(function (se, idx) {
+      var st = sessionStats(se, bw);
+      var add = function (type, set, text) { ev.push({ exId: exId, type: type, date: se.date, workoutId: se.w.id, setId: set.id, text: text }); };
+      var bestAt = {};
+      if (!bw) se.sets.forEach(function (x) { if (x.weight > 0) { var k = String(x.weight); if (!bestAt[k] || x.reps > bestAt[k].reps) bestAt[k] = x; } });
+      if (idx > 0) { // the very first session only sets the starting point
+        if (st.topW != null && st.topW > maxW) add('weight', st.topWSet, 'Heaviest weight: ' + fmtSet(st.topWSet, bw));
+        if (st.bestE != null && st.bestE > maxE) add('e1rm', st.bestESet, 'Estimated 1RM: ' + fmtVal(st.bestE) + ' kg');
+        if (st.actual != null && maxA != null && st.actual > maxA) add('max', st.actualSet, 'New real 1RM: ' + fmtVal(st.actual) + ' kg');
+        if (bw) { if (st.topR > maxR) add('reps', st.topRSet, 'Most reps in a set: ' + st.topR); }
+        else Object.keys(bestAt).forEach(function (k) {
+          if (repsAt[k] != null && bestAt[k].reps > repsAt[k]) add('repsAt', bestAt[k], bestAt[k].reps + ' reps at ' + num(bestAt[k].weight) + ' kg (was ' + repsAt[k] + ')');
+        });
+      }
+      if (st.topW != null && st.topW > maxW) maxW = st.topW;
+      if (st.bestE != null && st.bestE > maxE) maxE = st.bestE;
+      if (st.actual != null && (maxA == null || st.actual > maxA)) maxA = st.actual;
+      if (st.topR > maxR) maxR = st.topR;
+      Object.keys(bestAt).forEach(function (k) { if (repsAt[k] == null || bestAt[k].reps > repsAt[k]) repsAt[k] = bestAt[k].reps; });
+    });
+    return ev;
+  }
+
+  function allPRs() {
+    var ev = [];
+    db.exercises.forEach(function (e) { ev = ev.concat(exercisePRs(e.id)); });
+    return ev.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; });
+  }
+  function prSetMap() { var m = {}; allPRs().forEach(function (e) { m[e.setId] = true; }); return m; }
+
+  function exerciseRecords(exId) {
+    var bw = isBW(exId), r = { heaviest: null, e1rm: null, actual: null, mostReps: null, byReps: {} };
+    sessionsFor(exId).forEach(function (se) {
+      se.sets.forEach(function (s) {
+        var w = s.weight > 0 ? s.weight : 0;
+        if (w > 0 && (!r.heaviest || w > r.heaviest.weight || (w === r.heaviest.weight && s.reps > r.heaviest.reps))) r.heaviest = { weight: w, reps: s.reps, date: se.date };
+        var e = bw ? null : e1rm(s.weight, s.reps);
+        if (e != null && (!r.e1rm || e > r.e1rm.value)) r.e1rm = { value: e, weight: w, reps: s.reps, date: se.date };
+        if (isActual(s) && (!r.actual || s.weight > r.actual.weight)) r.actual = { weight: s.weight, date: se.date };
+        if (!r.mostReps || s.reps > r.mostReps.reps || (s.reps === r.mostReps.reps && w > r.mostReps.weight)) r.mostReps = { reps: s.reps, weight: w, date: se.date };
+        if (w > 0 && !bw) { var b = r.byReps[s.reps]; if (!b || w > b.weight) r.byReps[s.reps] = { weight: w, date: se.date }; }
+      });
+    });
+    return r;
+  }
+
+  function rangeStart(range) {
+    var n = { '1m': 1, '3m': 3, '6m': 6, '1y': 12 }[range];
+    if (!n) return '';
+    var d = new Date(); d.setMonth(d.getMonth() - n); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().slice(0, 10);
+  }
+  function shortDate(iso) { var p = iso.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }); }
+  function dayNum(iso) { var p = iso.split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 86400000; }
+  function delta(a, b, unit) {
+    var d = Math.round((a - b) * 10) / 10;
+    return d === 0 ? 'no change' : (d > 0 ? '+' : '\u2212') + fmtVal(Math.abs(d)) + (unit ? ' ' + unit : '');
+  }
+
+  function chartSvg(main, extra, sel) {
+    var W = 340, H = 210, L = 44, R = 14, T = 14, B = 30;
+    var all = main.concat(extra), ys = all.map(function (p) { return p.y; }), xs = all.map(function (p) { return dayNum(p.date); });
+    var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
+    var pad = (ymax - ymin) * 0.2; if (!pad) pad = Math.max(1, ymax * 0.1);
+    ymin = Math.max(0, ymin - pad); ymax = ymax + pad;
+    var xmin = Math.min.apply(null, xs), xmax = Math.max.apply(null, xs);
+    function X(d) { return xmax === xmin ? L + (W - L - R) / 2 : L + (dayNum(d) - xmin) / (xmax - xmin) * (W - L - R); }
+    function Y(v) { return T + (1 - (v - ymin) / (ymax - ymin)) * (H - T - B); }
+    var g = '';
+    for (var i = 0; i < 4; i++) {
+      var v = ymin + (ymax - ymin) * i / 3, y = Y(v);
+      g += '<line class="ch-grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + y + '" y2="' + y + '"/><text class="ch-txt" x="' + (L - 6) + '" y="' + (y + 4) + '" text-anchor="end">' + ((ymax - ymin) >= 6 ? Math.round(v) : fmtVal(v)) + '</text>';
+    }
+    var first = main.concat(extra).sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+    g += '<text class="ch-txt" x="' + L + '" y="' + (H - 8) + '" text-anchor="start">' + shortDate(first[0].date) + '</text>';
+    if (xmax !== xmin) g += '<text class="ch-txt" x="' + (W - R) + '" y="' + (H - 8) + '" text-anchor="end">' + shortDate(first[first.length - 1].date) + '</text>';
+    if (main.length > 1) g += '<polyline class="ch-line" fill="none" points="' + main.map(function (p) { return X(p.date) + ',' + Y(p.y); }).join(' ') + '"/>';
+    extra.forEach(function (p) {
+      var x = X(p.date), y = Y(p.y);
+      g += '<path class="ch-actual" d="M' + x + ' ' + (y - 6.5) + ' L' + (x + 6.5) + ' ' + y + ' L' + x + ' ' + (y + 6.5) + ' L' + (x - 6.5) + ' ' + y + ' Z"/>';
+    });
+    main.forEach(function (p, i) {
+      var x = X(p.date), y = Y(p.y);
+      if (i === sel) g += '<circle class="ch-sel" cx="' + x + '" cy="' + y + '" r="9"/>';
+      g += '<circle class="' + (p.pr ? 'ch-pr' : 'ch-pt') + '" cx="' + x + '" cy="' + y + '" r="' + (p.pr ? 5.5 : 4) + '"/>';
+      g += '<circle class="ch-hit" cx="' + x + '" cy="' + y + '" r="16" data-act="cpoint" data-i="' + i + '"/>';
+    });
+    return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Progress graph">' + g + '</svg>';
+  }
+
+  var METRICS = {
+    weight: { label: 'Weight', unit: 'kg', title: 'Top weight in a session' },
+    e1rm: { label: 'Est. 1RM', unit: 'kg', title: 'Estimated 1RM (Epley)' },
+    reps: { label: 'Reps', unit: 'reps', title: 'Most reps in a single set' }
+  };
+
+  function renderStrength() {
+    var list = [];
+    db.exercises.forEach(function (e) { var se = sessionsFor(e.id); if (se.length) list.push({ e: e, last: se[se.length - 1].date }); });
+    if (!list.length) {
+      return header('Strength Progress', 'Graphs, estimated 1RM and personal records') +
+        '<div class="card empty-card"><h2>No strength data yet</h2><p>Log a workout with finished sets and your graphs and records will appear here.</p><a class="btn primary" href="#/log">Log workout</a></div>';
+    }
+    var S = ui.str;
+    if (!S.ex || !find(list, function (x) { return x.e.id === S.ex; })) {
+      S.ex = list.slice().sort(function (a, b) { return a.last < b.last ? 1 : -1; })[0].e.id; S.point = null;
+    }
+    var exId = S.ex, bw = isBW(exId), sess = sessionsFor(exId);
+    var stats = sess.map(function (se) { return sessionStats(se, bw); });
+    var hasAdded = stats.some(function (st) { return st.topW != null; });
+    var avail = bw ? (hasAdded ? ['reps', 'weight'] : ['reps']) : ['weight', 'e1rm', 'reps'];
+    if (avail.indexOf(S.metric) < 0) S.metric = avail[0];
+    var m = S.metric, prs = exercisePRs(exId);
+    var prType = { weight: 'weight', e1rm: 'e1rm', reps: bw ? 'reps' : 'repsAt' }[m];
+
+    var start = rangeStart(S.range), main = [], extra = [];
+    sess.forEach(function (se, i) {
+      if (start && se.date < start) return;
+      var st = stats[i], y = m === 'weight' ? st.topW : m === 'e1rm' ? st.bestE : st.topR;
+      var best = st.bestSet;
+      if (y != null) main.push({ date: se.date, y: y, st: st, se: se, best: best,
+        pr: prs.some(function (e) { return e.workoutId === se.w.id && e.type === prType; }) });
+      if (m === 'e1rm' && st.actual != null) extra.push({ date: se.date, y: st.actual });
+    });
+    if (S.point == null || S.point >= main.length) S.point = main.length - 1;
+
+    var opts = list.sort(function (a, b) { return a.e.name.localeCompare(b.e.name); }).map(function (x) {
+      return '<option value="' + esc(x.e.id) + '"' + (x.e.id === exId ? ' selected' : '') + '>' + esc(x.e.name) + '</option>';
+    }).join('');
+    var html = header('Strength Progress', 'Graphs, estimated 1RM and personal records') +
+      '<div class="card"><label class="field" style="margin:0">Exercise<select data-in="sex">' + opts + '</select></label></div>';
+
+    // graph
+    html += '<div class="card"><h2>' + METRICS[m].title + '</h2><div class="chips">' +
+      avail.map(function (k) { return '<button class="chip' + (k === m ? ' active' : '') + '" data-act="smetric" data-v="' + k + '">' + (bw && k === 'weight' ? 'Added kg' : METRICS[k].label) + '</button>'; }).join('') + '</div>' +
+      '<div class="chips">' + [['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1y', '1Y'], ['all', 'All']].map(function (r) {
+        return '<button class="chip' + (S.range === r[0] ? ' active' : '') + '" data-act="srange" data-v="' + r[0] + '">' + r[1] + '</button>';
+      }).join('') + '</div>';
+    if (!main.length) {
+      html += '<p class="muted" style="margin:6px 0 0">No sessions with this measure in the selected range. Try a longer range.</p>';
+    } else {
+      html += chartSvg(main, extra, S.point);
+      html += '<div class="legend"><span><i class="lg-pt"></i>Session</span><span><i class="lg-pr"></i>New record</span>' + (m === 'e1rm' && extra.length ? '<span><i class="lg-act"></i>Real 1RM attempt</span>' : '') + '</div>';
+      var a = main[0], z = main[main.length - 1];
+      if (main.length > 1) html += '<p class="muted small">' + shortDate(a.date) + ' to ' + shortDate(z.date) + ': ' + fmtVal(a.y) + ' to ' + fmtVal(z.y) + ' ' + METRICS[m].unit + ' (' + delta(z.y, a.y, METRICS[m].unit) + ').</p>';
+      else html += '<p class="muted small">Only one session in this range, so there is no trend yet.</p>';
+      var pt = main[S.point];
+      html += '<div class="readout"><strong>' + fmtDate(pt.date) + '</strong><br>' + fmtVal(pt.y) + ' ' + METRICS[m].unit +
+        (pt.best ? '<br><span class="muted">Best set: ' + fmtSet(pt.best, bw) + '</span>' : '') +
+        '<br><span class="muted">All sets: ' + pt.se.sets.map(function (x) { return fmtSet(x, bw); }).join(', ') + '</span></div>';
+    }
+    html += '</div>';
+
+    // records
+    var rec = exerciseRecords(exId), rows = '';
+    function recRow(label, val, date) { return '<div class="row"><span>' + label + '</span><span class="rv">' + val + (date ? '<br><span class="muted small">' + fmtDate(date) + '</span>' : '') + '</span></div>'; }
+    if (rec.heaviest) rows += recRow(bw ? 'Heaviest added weight' : 'Heaviest weight', fmtSet({ weight: rec.heaviest.weight, reps: rec.heaviest.reps }, bw), rec.heaviest.date);
+    if (!bw) {
+      rows += rec.e1rm ? recRow('Best estimated 1RM', fmtVal(rec.e1rm.value) + ' kg <span class="muted small">(from ' + fmtSet({ weight: rec.e1rm.weight, reps: rec.e1rm.reps }, false) + ')</span>', rec.e1rm.date) : recRow('Best estimated 1RM', '<span class="muted">Not available yet</span>');
+      rows += rec.actual ? recRow('Real 1RM (marked attempt)', fmtVal(rec.actual.weight) + ' kg', rec.actual.date) : recRow('Real 1RM (marked attempt)', '<span class="muted">None marked</span>');
+    }
+    if (rec.mostReps) rows += recRow('Most reps in a set', rec.mostReps.reps + (rec.mostReps.weight > 0 ? ' at ' + num(rec.mostReps.weight) + ' kg' : (bw ? ' (bodyweight)' : '')), rec.mostReps.date);
+    html += '<div class="card"><h2>Personal records</h2><p class="muted small">All time, not limited by the range above.</p>' + rows + '</div>';
+
+    var repKeys = Object.keys(rec.byReps).map(Number).sort(function (a, b) { return a - b; });
+    if (repKeys.length) {
+      html += '<div class="card"><h2>Best weight by reps</h2>' + repKeys.map(function (k) {
+        return '<div class="row"><span>' + k + (k === 1 ? ' rep' : ' reps') + '</span><span class="rv">' + num(rec.byReps[k].weight) + ' kg<br><span class="muted small">' + fmtDate(rec.byReps[k].date) + '</span></span></div>';
+      }).join('') + '</div>';
+    }
+
+    // comparison of the latest two sessions
+    html += '<div class="card"><h2>Latest vs previous session</h2>';
+    if (sess.length < 2) {
+      html += '<p class="muted" style="margin:0">Log this exercise in one more workout to compare sessions.</p>';
+    } else {
+      var A = stats[stats.length - 1], Bp = stats[stats.length - 2];
+      html += '<p class="muted small">' + fmtDate(sess[sess.length - 1].date) + ' compared with ' + fmtDate(sess[sess.length - 2].date) + '</p>';
+      html += '<div class="row"><span>Best set</span><span class="rv">' + fmtSet(A.bestSet, bw) + '<br><span class="muted small">was ' + fmtSet(Bp.bestSet, bw) + '</span></span></div>';
+      if (!bw && A.bestE != null && Bp.bestE != null) html += '<div class="row"><span>Estimated 1RM</span><span class="rv">' + fmtVal(A.bestE) + ' kg<br><span class="muted small">' + delta(A.bestE, Bp.bestE, 'kg') + '</span></span></div>';
+      if (A.topW != null && Bp.topW != null) html += '<div class="row"><span>' + (bw ? 'Added weight' : 'Top weight') + '</span><span class="rv">' + fmtVal(A.topW) + ' kg<br><span class="muted small">' + delta(A.topW, Bp.topW, 'kg') + '</span></span></div>';
+      if (!bw) html += '<div class="row"><span>Total volume</span><span class="rv">' + fmtVal(A.vol) + ' kg<br><span class="muted small">' + delta(A.vol, Bp.vol, 'kg') + '</span></span></div>';
+      html += '<div class="row"><span>Most reps in a set</span><span class="rv">' + A.topR + '<br><span class="muted small">' + delta(A.topR, Bp.topR, '') + '</span></span></div>';
+    }
+    html += '</div>';
+
+    // recent records for this exercise
+    var recent = prs.slice().reverse().slice(0, 6);
+    html += '<div class="card"><h2>Recent records</h2>' + (recent.length ? recent.map(function (e) {
+      return '<div class="row"><span>' + fmtDate(e.date) + '</span><span class="rv">' + esc(e.text) + '</span></div>';
+    }).join('') : '<p class="muted" style="margin:0">No new records yet. A record needs an earlier session to beat.</p>') + '</div>';
+
+    html += '<p class="muted small foot">Estimated 1RM uses the Epley formula: weight \u00d7 (1 + reps \u00f7 30). Single reps use their actual weight and sets above ' + E1RM_MAX_REPS +
+      ' reps are left out. These are estimates, not tested maximums. Real 1RM attempts only count when you mark a 1-rep set as one.</p>';
     return html;
   }
 
@@ -281,12 +526,13 @@
       header(fmtDate(w.date), w.exercises.length + ' exercise' + (w.exercises.length === 1 ? '' : 's') + ', ' + sets + ' set' + (sets === 1 ? '' : 's'));
     if ((w.notes || '').trim()) html += '<div class="card"><h2>Notes</h2><p class="notes">' + esc(w.notes) + '</p></div>';
     if (!w.exercises.length) html += '<div class="card empty-card"><p style="margin:0">No exercises in this workout.</p></div>';
+    var prMap = prSetMap();
     w.exercises.forEach(function (we) {
       var bw = isBW(we.exerciseId);
       html += '<div class="card"><h2>' + esc(exName(we.exerciseId)) + (bw ? ' <span class="badge">Bodyweight</span>' : '') + '</h2>';
       if (!we.sets.length) html += '<p class="muted" style="margin:0">No sets recorded.</p>';
       we.sets.forEach(function (s, i) {
-        html += '<div class="row"><span>Set ' + (i + 1) + '</span><span>' + (isDone(s) ? fmtSet(s, bw) : '<span class="muted">Incomplete</span>') + '</span></div>' +
+        html += '<div class="row"><span>Set ' + (i + 1) + '</span><span>' + (isDone(s) ? fmtSet(s, bw) + (prMap[s.id] ? ' <span class="badge">PR</span>' : '') + (s.max ? ' <span class="badge amber">1RM attempt</span>' : '') : '<span class="muted">Incomplete</span>') + '</span></div>' +
           (s.note ? '<div class="snote">' + esc(s.note) + '</div>' : '');
       });
       html += '</div>';
@@ -314,7 +560,7 @@
         '<a class="btn primary" href="#/log">Log workout</a><a class="btn" href="#/body">Add measurement</a></div>';
     },
     log: function () { var w = activeWorkout(); return w ? renderEditor(w) : renderLogHome(); },
-    strength: function () { return comingSoon('Strength Progress', 'Graphs, estimated 1RM and personal records', 'Stage 5', 'Graphs and records appear once you have logged workouts.'); },
+    strength: function () { return renderStrength(); },
     body: function () { return comingSoon('Body Progress', 'Weight, body fat and measurements', 'Stage 6', 'Measurement entry and graphs appear here.'); },
     history: function () { return renderHistory(); },
     plan: function () { return comingSoon('My Plan', 'Your personal workout notebook', 'Stage 7', 'A free-form editor with formatting and automatic saving.'); },
@@ -330,7 +576,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 4: workout history</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 5: strength progress</span></div>' +
         '</div>';
     }
   };
@@ -413,6 +659,7 @@
     if (!btn) return;
     var act = btn.getAttribute('data-act');
     if (currentId() === 'history') { onHistoryClick(act, btn); return; }
+    if (currentId() === 'strength') { onStrengthClick(act, btn); return; }
     if (currentId() !== 'log') return;
     var w = activeWorkout();
     var we = w ? weOf(w, btn.getAttribute('data-we')) : null;
@@ -476,6 +723,14 @@
     }
   }
 
+  function onStrengthClick(act, btn) {
+    if (act === 'smetric') { ui.str.metric = btn.getAttribute('data-v'); ui.str.point = null; }
+    else if (act === 'srange') { ui.str.range = btn.getAttribute('data-v'); ui.str.point = null; }
+    else if (act === 'cpoint') { ui.str.point = parseInt(btn.getAttribute('data-i'), 10); }
+    else return;
+    rerender();
+  }
+
   function onHistoryClick(act, btn) {
     if (act === 'hopen') { ui.histOpen = btn.getAttribute('data-id'); rerender(); window.scrollTo(0, 0); }
     else if (act === 'hback') { ui.histOpen = null; rerender(); window.scrollTo(0, 0); }
@@ -509,6 +764,7 @@
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
     if (!kind) return;
     if (kind === 'hq' || kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
+    if (kind === 'sex') { if (currentId() === 'strength') { ui.str.ex = el.value; ui.str.point = null; rerender(); } return; }
     if (currentId() !== 'log') return;
 
     if (kind === 'exsearch') { ui.search = el.value; var l = document.getElementById('ex-list'); if (l) l.innerHTML = renderExList(el.value); return; }
@@ -524,6 +780,7 @@
     if (!s) return;
 
     if (kind === 'snote') { s.note = el.value; touch(w); return; }
+    if (kind === 'smax') { s.max = !!el.checked; touch(w); return; }
 
     var r = kind === 'weight' ? parseWeight(el.value) : parseReps(el.value);
     el.classList.toggle('bad', !r.ok);
@@ -546,6 +803,7 @@
   function onChange(ev) { // when leaving a field: put back the saved value if the typed one was invalid
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
     if (kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
+    if (kind === 'sex') { onInput(ev); return; }
     if ((kind !== 'weight' && kind !== 'reps') || currentId() !== 'log') return;
     var w = activeWorkout(); if (!w) return;
     var we = weOf(w, el.getAttribute('data-we')); var s = we ? setOf(we, el.getAttribute('data-set')) : null;
