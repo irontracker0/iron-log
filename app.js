@@ -90,7 +90,7 @@
   }
 
   /* ================= Screen state (not part of your saved data) ================= */
-  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null } };
+  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null }, dashDay: null };
   try { var u = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); if (u.activeId) ui.activeId = u.activeId; } catch (e) {}
   function saveUi() { try { localStorage.setItem(UI_KEY, JSON.stringify({ activeId: ui.activeId })); } catch (e) {} }
   function activeWorkout() {
@@ -196,7 +196,9 @@
     var html = '<div class="topbar"><button class="btn" data-act="done">Done</button></div>' +
       header('Workout', 'Everything saves automatically as you type') +
       '<div class="card"><label class="field">Date<input type="date" value="' + esc(w.date) + '" data-in="date"></label>' +
-      '<label class="field">Notes (optional)<textarea rows="2" maxlength="1000" placeholder="How did the session feel?" data-in="wnotes">' + esc(w.notes || '') + '</textarea></label></div>';
+      '<label class="field">Duration in minutes (optional)<input inputmode="numeric" autocomplete="off" placeholder="e.g. 60" value="' + esc(num(w.duration)) + '" data-in="dur"></label>' +
+      '<label class="field">Notes (optional)<textarea rows="2" maxlength="1000" placeholder="How did the session feel?" data-in="wnotes">' + esc(w.notes || '') + '</textarea></label></div>' +
+      '<div id="strain-live">' + strainCardHtml(w) + '</div>';
     if (!w.exercises.length) html += '<div class="card empty-card"><p style="margin:0">No exercises yet. Add your first one below.</p></div>';
     w.exercises.forEach(function (we) { html += renderExerciseCard(w, we); });
     html += ui.picking ? renderPicker() : '<button class="btn primary wide" data-act="addex">Add exercise</button>';
@@ -449,6 +451,118 @@
   }
 
 
+  /* ================= Workout strain (0 to 36) =================
+     Idea: compare what you DID in a set with what you COULD have done, based on your own earlier workouts.
+     1. For each exercise, "capacity" = your best estimated max from workouts BEFORE this one (Epley, sets up to 15 reps).
+        With no earlier history, this workout's own sets are used instead.
+     2. For each set: max reps possible at that weight = 30 x (capacity / weight - 1).
+        effort = reps done / max reps possible (capped at 1). Bodyweight: reps / your best reps at that load or heavier.
+     3. Work = sum of effort squared (hard sets count much more than easy ones or warm-ups).
+     4. Time you typed in adjusts the work by roughly -40% (very short) to +25% (long). No time entered = no adjustment.
+     5. The curved scale: score = 36 x (1 - e^(-work / 16)). Early points come easily, the top is hard to reach. */
+  var STRAIN_MAX = 36, STRAIN_K = 16, STRAIN_CAP_REPS = 15;
+
+  function isBefore(a, b) { return a.date < b.date || (a.date === b.date && a.createdAt < b.createdAt); }
+  function priorSets(exId, w) {
+    var out = [];
+    db.workouts.forEach(function (o) {
+      if (o.id === w.id || !isBefore(o, w)) return;
+      o.exercises.forEach(function (x) { if (x.exerciseId === exId) x.sets.forEach(function (s) { if (isDone(s)) out.push(s); }); });
+    });
+    return out;
+  }
+  function setEffort(s, cap, bw) {
+    var w = s.weight > 0 ? s.weight : 0;
+    if (bw) {
+      var base = 0;
+      cap.forEach(function (p) { if ((p.weight > 0 ? p.weight : 0) >= w && p.reps > base) base = p.reps; });
+      return { e: base ? Math.min(1, s.reps / base) : 1 };
+    }
+    if (w <= 0) return { skip: true };
+    var E = 0;
+    cap.forEach(function (p) { if (p.weight > 0) { var est = p.weight * (1 + Math.min(p.reps, STRAIN_CAP_REPS) / 30); if (est > E) E = est; } });
+    if (w >= E) return { e: 1 };
+    return { e: Math.min(1, s.reps / (30 * (E / w - 1))) };
+  }
+  function workoutStrain(w) {
+    var V = 0, n = 0, sumE = 0, skipped = 0, learning = [];
+    w.exercises.forEach(function (x) {
+      var done = x.sets.filter(isDone);
+      if (!done.length) return;
+      var cap = priorSets(x.exerciseId, w);
+      if (!cap.length) { cap = done; learning.push(exName(x.exerciseId)); }
+      var bw = isBW(x.exerciseId);
+      done.forEach(function (s) {
+        var r = setEffort(s, cap, bw);
+        if (r.skip) { skipped++; return; }
+        V += r.e * r.e; sumE += r.e; n++;
+      });
+    });
+    if (!n) return null;
+    var d = w.duration > 0 ? w.duration : null;
+    var tf = d ? 0.6 + 0.65 * (1 - Math.exp(-d / 45)) : 1;
+    var raw = V * tf;
+    return { score: Math.round(STRAIN_MAX * (1 - Math.exp(-raw / STRAIN_K)) * 10) / 10, sets: n, avgEffort: sumE / n, work: V, duration: d, timeFactor: tf, learning: learning, skipped: skipped };
+  }
+  function strainLabel(x) { return x < 9 ? 'Light' : x < 17 ? 'Moderate' : x < 25 ? 'Hard' : x < 31 ? 'Very hard' : 'All-out'; }
+
+  function gaugeSvg(score) {
+    var r = 54, c = 2 * Math.PI * r, f = Math.max(0, Math.min(1, score / STRAIN_MAX));
+    return '<svg class="gauge" viewBox="0 0 140 140" role="img" aria-label="Strain ' + score.toFixed(1) + ' out of ' + STRAIN_MAX + '">' +
+      '<circle class="g-bg" cx="70" cy="70" r="' + r + '"/>' +
+      (f > 0 ? '<circle class="g-fg" cx="70" cy="70" r="' + r + '" stroke-dasharray="' + (c * f).toFixed(2) + ' ' + c.toFixed(2) + '" transform="rotate(-90 70 70)"/>' : '') +
+      '<text class="g-num" x="70" y="77" text-anchor="middle">' + score.toFixed(1) + '</text><text class="g-sub" x="70" y="97" text-anchor="middle">of ' + STRAIN_MAX + '</text></svg>';
+  }
+
+  function strainCardHtml(w) {
+    var st = workoutStrain(w);
+    if (!st) return '<div class="card"><h2>Workout strain</h2><p class="muted" style="margin:0">Finish a set with weight and reps to see this workout\u2019s strain.</p></div>';
+    var notes = '';
+    if (st.learning.length) notes += '<p class="muted small">No earlier history for ' + esc(st.learning.join(', ')) + ', so the comparison used this workout alone. Scores get more meaningful as you log more sessions.</p>';
+    if (st.skipped) notes += '<p class="muted small">' + st.skipped + ' set' + (st.skipped === 1 ? ' has' : 's have') + ' no weight and ' + (st.skipped === 1 ? 'is' : 'are') + ' not counted.</p>';
+    return '<div class="card strain"><div class="strain-top">' + gaugeSvg(st.score) +
+      '<div><h2>Workout strain</h2><div class="strain-label">' + strainLabel(st.score) + '</div>' +
+      '<p class="muted small" style="margin:6px 0 0">' + st.sets + ' set' + (st.sets === 1 ? '' : 's') + ' counted<br>Average effort ' + Math.round(st.avgEffort * 100) + '% of your best' +
+      '<br>' + (st.duration ? 'Time ' + st.duration + ' min (\u00d7' + st.timeFactor.toFixed(2) + ')' : 'No time entered, so time is not counted') + '</p></div></div>' + notes +
+      '<details class="how"><summary>How is this calculated?</summary><p>Each set is compared with the most you could have done at that weight, based on your own earlier workouts. ' +
+      'Hard sets count much more than easy sets or warm-ups, and the time you enter adjusts the total a little. The result is put on a curved 0 to ' + STRAIN_MAX +
+      ' scale, so the top is hard to reach. It is an estimate of workout load from weight, reps and time, not a medical measurement.</p></details></div>';
+  }
+  function refreshStrain(w) { var el = document.getElementById('strain-live'); if (el) el.innerHTML = strainCardHtml(w); }
+
+  /* ---------- Dashboard: month dots ---------- */
+  function pad2(n) { return n < 10 ? '0' + n : String(n); }
+  function renderDots() {
+    var t = today(), y = +t.slice(0, 4), mo = +t.slice(5, 7), dim = new Date(y, mo, 0).getDate();
+    var by = {}, days = 0;
+    loggedWorkouts().forEach(function (w) {
+      if (w.date.slice(0, 7) !== t.slice(0, 7)) return;
+      var st = workoutStrain(w); if (!st) return;
+      if (!by[w.date]) { by[w.date] = { max: 0, list: [] }; days++; }
+      by[w.date].list.push({ w: w, st: st }); if (st.score > by[w.date].max) by[w.date].max = st.score;
+    });
+    var html = '<div class="card dots-card"><div class="dots-head"><h2>' + monthLabel(t) + '</h2><span class="muted small">' + days + ' training day' + (days === 1 ? '' : 's') + '</span></div><div class="dots">';
+    for (var d = 1; d <= dim; d++) {
+      var iso = y + '-' + pad2(mo) + '-' + pad2(d), cls = 'dot', style = '', label = fmtDate(iso);
+      if (by[iso]) { cls += ' work'; style = ' style="background:rgba(95,191,138,' + (0.3 + 0.7 * Math.min(1, by[iso].max / 30)).toFixed(2) + ')"'; label += ', strain ' + by[iso].max.toFixed(1); }
+      else if (iso > t) cls += ' future'; else cls += ' rest';
+      if (iso === t) cls += ' today';
+      if (ui.dashDay === iso) cls += ' picked';
+      html += '<button class="' + cls + '"' + style + ' data-act="dday" data-d="' + iso + '" aria-label="' + label + '"></button>';
+    }
+    html += '</div><div class="dots-legend muted small"><span>Rest</span><i class="dl-rest"></i><span>Light</span><i class="dl-grad"></i><span>Hard</span></div>';
+    if (ui.dashDay && ui.dashDay.slice(0, 7) === t.slice(0, 7)) {
+      var e = by[ui.dashDay];
+      html += '<div class="readout"><strong>' + fmtDate(ui.dashDay) + '</strong>';
+      if (e) e.list.forEach(function (x) {
+        html += '<br>Strain ' + x.st.score.toFixed(1) + ' (' + strainLabel(x.st.score) + '), ' + x.w.exercises.length + ' exercise' + (x.w.exercises.length === 1 ? '' : 's') +
+          ' <button class="link" data-act="dopen" data-id="' + esc(x.w.id) + '">Open</button>';
+      }); else html += '<br><span class="muted">' + (ui.dashDay > t ? 'Upcoming day.' : 'No workout logged.') + '</span>';
+      html += '</div>';
+    }
+    return html + '</div>';
+  }
+
   /* ---------- Workout History ---------- */
   function monthLabel(iso) {
     var p = iso.split('-');
@@ -523,7 +637,8 @@
   function renderHistoryDetail(w) {
     var sets = 0; w.exercises.forEach(function (x) { sets += x.sets.length; });
     var html = '<div class="topbar left"><button class="btn" data-act="hback">Back</button></div>' +
-      header(fmtDate(w.date), w.exercises.length + ' exercise' + (w.exercises.length === 1 ? '' : 's') + ', ' + sets + ' set' + (sets === 1 ? '' : 's'));
+      header(fmtDate(w.date), w.exercises.length + ' exercise' + (w.exercises.length === 1 ? '' : 's') + ', ' + sets + ' set' + (sets === 1 ? '' : 's') + (w.duration ? ', ' + w.duration + ' min' : '')) +
+      strainCardHtml(w);
     if ((w.notes || '').trim()) html += '<div class="card"><h2>Notes</h2><p class="notes">' + esc(w.notes) + '</p></div>';
     if (!w.exercises.length) html += '<div class="card empty-card"><p style="margin:0">No exercises in this workout.</p></div>';
     var prMap = prSetMap();
@@ -549,7 +664,9 @@
   var PAGES = {
     dashboard: function () {
       var n = loggedWorkouts().length;
-      return header('Dashboard', 'Your progress at a glance') +
+      var latest = loggedWorkouts().sort(byNewest)[0];
+      return header('Dashboard', 'Your progress at a glance') + renderDots() +
+        (latest ? '<h2 class="section">Latest workout · ' + fmtDate(latest.date) + '</h2>' + strainCardHtml(latest) : '') +
         '<div class="grid">' +
           '<div class="card"><div class="stat-label">Body weight</div><div class="stat-value empty">No data</div></div>' +
           '<div class="card"><div class="stat-label">Body fat</div><div class="stat-value empty">No data</div></div>' +
@@ -576,7 +693,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 5: strength progress</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 5b: workout strain</span></div>' +
         '</div>';
     }
   };
@@ -660,6 +777,11 @@
     var act = btn.getAttribute('data-act');
     if (currentId() === 'history') { onHistoryClick(act, btn); return; }
     if (currentId() === 'strength') { onStrengthClick(act, btn); return; }
+    if (currentId() === 'dashboard') {
+      if (act === 'dday') { var dd = btn.getAttribute('data-d'); ui.dashDay = ui.dashDay === dd ? null : dd; rerender(); }
+      else if (act === 'dopen') { ui.histOpen = btn.getAttribute('data-id'); location.hash = '#/history'; }
+      return;
+    }
     if (currentId() !== 'log') return;
     var w = activeWorkout();
     var we = w ? weOf(w, btn.getAttribute('data-we')) : null;
@@ -745,6 +867,13 @@
     }
   }
 
+  function parseDuration(v) {
+    v = v.trim();
+    if (v === '') return { ok: true, val: null };
+    if (!/^\d{1,3}$/.test(v)) return { ok: false };
+    var n = parseInt(v, 10);
+    return (n >= 1 && n <= 600) ? { ok: true, val: n } : { ok: false };
+  }
   function parseWeight(v) {
     v = v.trim().replace(',', '.');
     if (v === '') return { ok: true, val: null };
@@ -772,7 +901,8 @@
     var w = activeWorkout();
     if (!w) return;
 
-    if (kind === 'date') { if (validDate(el.value)) { w.date = el.value; touch(w); } return; }
+    if (kind === 'date') { if (validDate(el.value)) { w.date = el.value; touch(w); refreshStrain(w); } return; }
+    if (kind === 'dur') { var dr = parseDuration(el.value); el.classList.toggle('bad', !dr.ok); if (dr.ok) { w.duration = dr.val; touch(w); refreshStrain(w); } return; }
     if (kind === 'wnotes') { w.notes = el.value; touch(w); return; }
 
     var we = weOf(w, el.getAttribute('data-we'));
@@ -785,7 +915,7 @@
     var r = kind === 'weight' ? parseWeight(el.value) : parseReps(el.value);
     el.classList.toggle('bad', !r.ok);
     if (!r.ok) return; // keep the last good value until the field is fixed
-    s[kind] = r.val; touch(w);
+    s[kind] = r.val; touch(w); refreshStrain(w);
   }
 
   function onHistoryFilter(kind, el) {
@@ -804,6 +934,7 @@
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
     if (kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
     if (kind === 'sex') { onInput(ev); return; }
+    if (kind === 'dur' && currentId() === 'log') { var wd = activeWorkout(); if (wd && !parseDuration(el.value).ok) { el.value = num(wd.duration); el.classList.remove('bad'); } return; }
     if ((kind !== 'weight' && kind !== 'reps') || currentId() !== 'log') return;
     var w = activeWorkout(); if (!w) return;
     var we = weOf(w, el.getAttribute('data-we')); var s = we ? setOf(we, el.getAttribute('data-set')) : null;
