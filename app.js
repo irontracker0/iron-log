@@ -39,6 +39,8 @@
   }
 
   var db = load();
+  if (!db.measureTypes) db.measureTypes = [];
+  if (!db.measurements) db.measurements = [];
 
   /* ================= Small helpers ================= */
   function esc(s) {
@@ -90,7 +92,7 @@
   }
 
   /* ================= Screen state (not part of your saved data) ================= */
-  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null }, dashDay: null };
+  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null }, dashDay: null, body: { ranges: {}, sel: {}, draft: {}, date: '', newCustom: false, edit: null, filter: '', limit: 30, msg: '' } };
   try { var u = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); if (u.activeId) ui.activeId = u.activeId; } catch (e) {}
   function saveUi() { try { localStorage.setItem(UI_KEY, JSON.stringify({ activeId: ui.activeId })); } catch (e) {} }
   function activeWorkout() {
@@ -312,7 +314,7 @@
     return d === 0 ? 'no change' : (d > 0 ? '+' : '\u2212') + fmtVal(Math.abs(d)) + (unit ? ' ' + unit : '');
   }
 
-  function chartSvg(main, extra, sel) {
+  function chartSvg(main, extra, sel, hit) {
     var W = 340, H = 210, L = 44, R = 14, T = 14, B = 30;
     var all = main.concat(extra), ys = all.map(function (p) { return p.y; }), xs = all.map(function (p) { return dayNum(p.date); });
     var ymin = Math.min.apply(null, ys), ymax = Math.max.apply(null, ys);
@@ -338,7 +340,7 @@
       var x = X(p.date), y = Y(p.y);
       if (i === sel) g += '<circle class="ch-sel" cx="' + x + '" cy="' + y + '" r="9"/>';
       g += '<circle class="' + (p.pr ? 'ch-pr' : 'ch-pt') + '" cx="' + x + '" cy="' + y + '" r="' + (p.pr ? 5.5 : 4) + '"/>';
-      g += '<circle class="ch-hit" cx="' + x + '" cy="' + y + '" r="16" data-act="cpoint" data-i="' + i + '"/>';
+      g += '<circle class="ch-hit" cx="' + x + '" cy="' + y + '" r="16" ' + (hit || 'data-act="cpoint"') + ' data-i="' + i + '"/>';
     });
     return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Progress graph">' + g + '</svg>';
   }
@@ -563,6 +565,190 @@
     return html + '</div>';
   }
 
+  /* ================= Body measurements ================= */
+  var BODY_TYPES = [
+    { id: 'weight', name: 'Body weight', unit: 'kg', min: 20, max: 500 },
+    { id: 'bodyfat', name: 'Body fat', unit: '%', min: 1, max: 70 },
+    { id: 'chest', name: 'Chest', unit: 'cm', min: 5, max: 300 },
+    { id: 'armL', name: 'Left arm', unit: 'cm', min: 5, max: 300 },
+    { id: 'armR', name: 'Right arm', unit: 'cm', min: 5, max: 300 },
+    { id: 'waist', name: 'Waist', unit: 'cm', min: 5, max: 300 },
+    { id: 'thigh', name: 'Thigh', unit: 'cm', min: 5, max: 300 }
+  ];
+  function bodyTypes() {
+    return BODY_TYPES.concat(db.measureTypes.map(function (c) { return { id: c.id, name: c.name, unit: c.unit, min: 0, max: 1000000, custom: true }; }));
+  }
+  function bodyType(id) { return find(bodyTypes(), function (t) { return t.id === id; }); }
+  function fmtN(n) { return String(Math.round(n * 100) / 100); }
+  function parseBody(v, t) {
+    v = v.trim().replace(',', '.');
+    if (v === '') return { ok: true, val: null };
+    if (!/^\d{1,6}(\.\d{1,2})?$/.test(v)) return { ok: false };
+    var n = parseFloat(v);
+    return (n >= t.min && n <= t.max) ? { ok: true, val: n } : { ok: false };
+  }
+  function rangeText(t) { return t.custom ? 'a number' : t.min + ' to ' + t.max + ' ' + t.unit; }
+
+  function entriesFor(typeId) {
+    return db.measurements.filter(function (m) { return m.type === typeId; }).sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return a.createdAt < b.createdAt ? -1 : 1;
+    });
+  }
+  function bodyDays(typeId) { // one point per date: the average if several were entered that day
+    var map = {}, order = [];
+    entriesFor(typeId).forEach(function (m) { if (!map[m.date]) { map[m.date] = []; order.push(m.date); } map[m.date].push(m.value); });
+    return order.map(function (d) {
+      var a = map[d], sum = 0; a.forEach(function (x) { sum += x; });
+      return { date: d, y: Math.round(sum / a.length * 100) / 100, n: a.length };
+    });
+  }
+  function bodyStatCard(typeId, label) {
+    var t = bodyType(typeId), days = bodyDays(typeId);
+    if (!days.length) return '<div class="card"><div class="stat-label">' + label + '</div><div class="stat-value empty">No data</div></div>';
+    var last = days[days.length - 1], prev = days.length > 1 ? days[days.length - 2] : null;
+    return '<div class="card"><div class="stat-label">' + label + '</div><div class="stat-value">' + fmtN(last.y) + '<span class="unit"> ' + t.unit + '</span></div>' +
+      '<div class="muted small">' + shortDate(last.date) + (prev ? ' \u00b7 ' + delta(last.y, prev.y, t.unit) : '') + '</div></div>';
+  }
+
+  var PENCIL = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+
+  function renderBodyForm() {
+    var B = ui.body;
+    var fields = bodyTypes().map(function (t) {
+      return '<label class="field bf"><span>' + esc(t.name) + ' (' + esc(t.unit) + ')</span><input inputmode="decimal" autocomplete="off" data-in="bf" data-t="' + esc(t.id) + '" value="' + esc(B.draft[t.id] || '') + '"></label>';
+    }).join('');
+    var custom = '<button class="btn" data-act="bcustomtoggle">' + (B.newCustom ? 'Close custom measurements' : 'Add custom measurement') + '</button>';
+    if (B.newCustom) {
+      custom += '<div class="custom-box"><label class="field">Name<input id="cm-name" maxlength="30" placeholder="e.g. Neck" autocomplete="off"></label>' +
+        '<label class="field">Unit<input id="cm-unit" maxlength="10" value="cm" autocomplete="off"></label>' +
+        '<button class="btn primary" data-act="bcustomcreate">Create measurement</button>';
+      if (db.measureTypes.length) {
+        custom += '<h2 class="section">Your custom measurements</h2>' + db.measureTypes.map(function (c) {
+          return '<div class="entry"><div class="grow">' + esc(c.name) + ' <span class="muted">(' + esc(c.unit) + ')</span></div><button class="btn danger sm" data-act="bcustomdel" data-id="' + esc(c.id) + '">Delete</button></div>';
+        }).join('');
+      }
+      custom += '</div>';
+    }
+    return '<div class="card"><h2>Add measurements</h2><p class="muted small">Fill in only what you measured. Each value is saved as its own entry for the date below.</p>' +
+      '<label class="field">Date<input type="date" value="' + esc(B.date || today()) + '" data-in="bdate"></label>' +
+      '<div class="two">' + fields + '</div>' +
+      (B.msg ? '<p class="ok">' + esc(B.msg) + '</p>' : '') +
+      '<button class="btn primary wide" data-act="bsave">Save measurements</button>' + custom + '</div>';
+  }
+
+  function renderBodyGraph(t) {
+    var B = ui.body, days = bodyDays(t.id);
+    if (!days.length) return '';
+    var range = B.ranges[t.id] || 'all', start = rangeStart(range);
+    var pts = days.filter(function (d) { return !start || d.date >= start; });
+    var html = '<div class="card"><h2>' + esc(t.name) + ' <span class="muted">(' + esc(t.unit) + ')</span></h2><div class="chips">' +
+      [['1m', '1M'], ['3m', '3M'], ['6m', '6M'], ['1y', '1Y'], ['all', 'All']].map(function (r) {
+        return '<button class="chip' + (range === r[0] ? ' active' : '') + '" data-act="brange" data-t="' + esc(t.id) + '" data-v="' + r[0] + '">' + r[1] + '</button>';
+      }).join('') + '</div>';
+    var last = days[days.length - 1], prev = days.length > 1 ? days[days.length - 2] : null;
+    html += '<p style="margin:4px 0 2px"><span class="big">' + fmtN(last.y) + '</span> ' + esc(t.unit) + ' <span class="muted small">on ' + shortDate(last.date) + (prev ? ' \u00b7 ' + delta(last.y, prev.y, t.unit) + ' since previous' : '') + '</span></p>';
+    if (!pts.length) {
+      html += '<p class="muted small">No entries in this range. Try a longer range.</p>';
+    } else {
+      var sel = B.sel[t.id]; if (sel == null || sel >= pts.length) sel = pts.length - 1;
+      html += chartSvg(pts.map(function (d) { return { date: d.date, y: d.y, pr: false }; }), [], sel, 'data-act="bpoint" data-t="' + esc(t.id) + '"');
+      if (pts.length > 1) html += '<p class="muted small">' + shortDate(pts[0].date) + ' to ' + shortDate(pts[pts.length - 1].date) + ': ' + fmtN(pts[0].y) + ' to ' + fmtN(pts[pts.length - 1].y) + ' ' + esc(t.unit) + ' (' + delta(pts[pts.length - 1].y, pts[0].y, t.unit) + ').</p>';
+      else html += '<p class="muted small">Only one entry in this range, so there is no trend yet.</p>';
+      var pt = pts[sel];
+      html += '<div class="readout"><strong>' + fmtDate(pt.date) + '</strong><br>' + fmtN(pt.y) + ' ' + esc(t.unit) + (pt.n > 1 ? '<br><span class="muted">Average of ' + pt.n + ' entries that day</span>' : '') + '</div>';
+    }
+    if (t.id === 'bodyfat') html += '<p class="muted small" style="margin-bottom:0">Body-fat readings vary a lot between devices, times of day and hydration. Look at the trend over weeks, not single values.</p>';
+    return html + '</div>';
+  }
+
+  function renderBodyEntries() {
+    var B = ui.body, types = bodyTypes();
+    var prevDelta = {};
+    types.forEach(function (t) { var prev = null; entriesFor(t.id).forEach(function (m) { if (prev != null) prevDelta[m.id] = m.value - prev; prev = m.value; }); });
+    var list = db.measurements.filter(function (m) { return bodyType(m.type) && (!B.filter || m.type === B.filter); }).sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return a.createdAt < b.createdAt ? 1 : -1;
+    });
+    var opts = '<option value="">All measurements</option>' + types.map(function (t) { return '<option value="' + esc(t.id) + '"' + (B.filter === t.id ? ' selected' : '') + '>' + esc(t.name) + '</option>'; }).join('');
+    var html = '<div class="card"><h2>Measurement history</h2><label class="field"><select data-in="btype">' + opts + '</select></label>';
+    if (!list.length) return html + '<p class="muted" style="margin:0">Nothing here yet.</p></div>';
+    list.slice(0, B.limit).forEach(function (m) {
+      var t = bodyType(m.type);
+      if (B.edit === m.id) {
+        html += '<div class="entry edit"><div class="grow"><strong>' + esc(t.name) + '</strong>' +
+          '<label class="field">Date<input type="date" id="be-date" value="' + esc(m.date) + '"></label>' +
+          '<label class="field">Value (' + esc(t.unit) + ')<input id="be-value" inputmode="decimal" autocomplete="off" value="' + esc(fmtN(m.value)) + '"></label>' +
+          '<button class="btn primary" data-act="beditsave" data-id="' + esc(m.id) + '">Save</button><button class="btn" data-act="beditcancel">Cancel</button></div></div>';
+        return;
+      }
+      html += '<div class="entry"><div class="grow"><strong>' + fmtN(m.value) + ' ' + esc(t.unit) + '</strong> <span class="muted">' + esc(t.name) + '</span><br>' +
+        '<span class="muted small">' + fmtDate(m.date) + (prevDelta[m.id] != null ? ' \u00b7 ' + delta(m.value, m.value - prevDelta[m.id], t.unit) + ' vs previous' : '') + '</span></div>' +
+        '<button class="icon-btn" aria-label="Edit entry" data-act="bedit" data-id="' + esc(m.id) + '">' + PENCIL + '</button>' +
+        '<button class="icon-btn" aria-label="Delete entry" data-act="bdel" data-id="' + esc(m.id) + '">' + X + '</button></div>';
+    });
+    if (list.length > B.limit) html += '<button class="btn wide" data-act="bmore">Show more</button>';
+    return html + '</div>';
+  }
+
+  function renderBody() {
+    var html = header('Body Progress', 'Weight, body fat and measurements') + renderBodyForm();
+    var graphs = bodyTypes().map(renderBodyGraph).join('');
+    if (!db.measurements.length) {
+      html += '<div class="card empty-card"><h2>No measurements yet</h2><p style="margin:0">Add your first measurement above. Graphs appear here for every measurement you record.</p></div>';
+    } else html += graphs + renderBodyEntries();
+    return html;
+  }
+
+  function onBodyClick(act, btn) {
+    var B = ui.body;
+    if (act === 'bsave') {
+      var date = B.date || today();
+      if (!validDate(date)) { alert('Please choose a valid date.'); return; }
+      var inputs = view.querySelectorAll('[data-in="bf"]'), made = [], bad = [];
+      Array.prototype.forEach.call(inputs, function (el) {
+        var t = bodyType(el.getAttribute('data-t')); if (!t) return;
+        var r = parseBody(el.value, t);
+        if (!r.ok) { bad.push(t.name + ' (' + rangeText(t) + ')'); el.classList.add('bad'); }
+        else if (r.val != null) made.push({ id: uid(), date: date, type: t.id, value: r.val, createdAt: new Date().toISOString() });
+      });
+      if (bad.length) { alert('Please check these values:\n' + bad.join('\n')); return; }
+      if (!made.length) { alert('Enter at least one measurement first.'); return; }
+      made.forEach(function (m) { db.measurements.push(m); });
+      if (!save()) { alert('Could not save. Your data was not changed.'); db.measurements = db.measurements.filter(function (m) { return made.indexOf(m) < 0; }); return; }
+      B.draft = {}; B.msg = 'Saved ' + made.length + ' measurement' + (made.length === 1 ? '' : 's') + ' for ' + fmtDate(date) + '.';
+      rerender();
+    } else if (act === 'bcustomtoggle') { B.newCustom = !B.newCustom; rerender(); }
+    else if (act === 'bcustomcreate') {
+      var name = document.getElementById('cm-name').value.replace(/\s+/g, ' ').trim(), unit = document.getElementById('cm-unit').value.trim() || 'cm';
+      if (!name) { alert('Please type a name.'); return; }
+      if (bodyTypes().some(function (t) { return t.name.toLowerCase() === name.toLowerCase(); })) { alert('A measurement with that name already exists.'); return; }
+      db.measureTypes.push({ id: 'c' + uid(), name: name, unit: unit }); save(); B.msg = ''; rerender();
+    } else if (act === 'bcustomdel') {
+      var id = btn.getAttribute('data-id'), ct = find(db.measureTypes, function (c) { return c.id === id; });
+      if (!ct) return;
+      var cnt = db.measurements.filter(function (m) { return m.type === id; }).length;
+      if (!confirm('Delete "' + ct.name + '"' + (cnt ? ' and its ' + cnt + ' saved entr' + (cnt === 1 ? 'y' : 'ies') : '') + '? This cannot be undone.')) return;
+      db.measureTypes = db.measureTypes.filter(function (c) { return c.id !== id; });
+      db.measurements = db.measurements.filter(function (m) { return m.type !== id; }); save(); rerender();
+    } else if (act === 'brange') { var tid = btn.getAttribute('data-t'); B.ranges[tid] = btn.getAttribute('data-v'); B.sel[tid] = null; rerender(); }
+    else if (act === 'bpoint') { B.sel[btn.getAttribute('data-t')] = parseInt(btn.getAttribute('data-i'), 10); rerender(); }
+    else if (act === 'bedit') { B.edit = btn.getAttribute('data-id'); rerender(); }
+    else if (act === 'beditcancel') { B.edit = null; rerender(); }
+    else if (act === 'beditsave') {
+      var m = find(db.measurements, function (x) { return x.id === btn.getAttribute('data-id'); }); if (!m) return;
+      var t2 = bodyType(m.type), nd = document.getElementById('be-date').value, nv = parseBody(document.getElementById('be-value').value, t2);
+      if (!validDate(nd)) { alert('Please choose a valid date.'); return; }
+      if (!nv.ok || nv.val == null) { alert('Please enter a valid value: ' + rangeText(t2) + '.'); return; }
+      m.date = nd; m.value = nv.val; save(); B.edit = null; rerender();
+    } else if (act === 'bdel') {
+      var dm = find(db.measurements, function (x) { return x.id === btn.getAttribute('data-id'); }); if (!dm) return;
+      var dt = bodyType(dm.type);
+      if (!confirm('Delete this entry (' + fmtN(dm.value) + ' ' + dt.unit + ', ' + fmtDate(dm.date) + ')? This cannot be undone.')) return;
+      db.measurements = db.measurements.filter(function (x) { return x.id !== dm.id; }); save(); rerender();
+    } else if (act === 'bmore') { B.limit += 30; rerender(); }
+  }
+
   /* ---------- Workout History ---------- */
   function monthLabel(iso) {
     var p = iso.split('-');
@@ -668,8 +854,7 @@
       return header('Dashboard', 'Your progress at a glance') + renderDots() +
         (latest ? '<h2 class="section">Latest workout · ' + fmtDate(latest.date) + '</h2>' + strainCardHtml(latest) : '') +
         '<div class="grid">' +
-          '<div class="card"><div class="stat-label">Body weight</div><div class="stat-value empty">No data</div></div>' +
-          '<div class="card"><div class="stat-label">Body fat</div><div class="stat-value empty">No data</div></div>' +
+          bodyStatCard('weight', 'Body weight') + bodyStatCard('bodyfat', 'Body fat') +
           '<div class="card"><div class="stat-label">Workouts logged</div><div class="stat-value' + (n ? '' : ' empty') + '">' + (n || 'None yet') + '</div></div>' +
           '<div class="card"><div class="stat-label">Exercises in library</div><div class="stat-value">' + db.exercises.length + '</div></div>' +
         '</div>' +
@@ -678,7 +863,7 @@
     },
     log: function () { var w = activeWorkout(); return w ? renderEditor(w) : renderLogHome(); },
     strength: function () { return renderStrength(); },
-    body: function () { return comingSoon('Body Progress', 'Weight, body fat and measurements', 'Stage 6', 'Measurement entry and graphs appear here.'); },
+    body: function () { return renderBody(); },
     history: function () { return renderHistory(); },
     plan: function () { return comingSoon('My Plan', 'Your personal workout notebook', 'Stage 7', 'A free-form editor with formatting and automatic saving.'); },
     settings: function () {
@@ -693,7 +878,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 5b: workout strain</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 6: body progress</span></div>' +
         '</div>';
     }
   };
@@ -777,6 +962,7 @@
     var act = btn.getAttribute('data-act');
     if (currentId() === 'history') { onHistoryClick(act, btn); return; }
     if (currentId() === 'strength') { onStrengthClick(act, btn); return; }
+    if (currentId() === 'body') { onBodyClick(act, btn); return; }
     if (currentId() === 'dashboard') {
       if (act === 'dday') { var dd = btn.getAttribute('data-d'); ui.dashDay = ui.dashDay === dd ? null : dd; rerender(); }
       else if (act === 'dopen') { ui.histOpen = btn.getAttribute('data-id'); location.hash = '#/history'; }
@@ -893,6 +1079,9 @@
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
     if (!kind) return;
     if (kind === 'hq' || kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
+    if (kind === 'bf') { ui.body.draft[el.getAttribute('data-t')] = el.value; el.classList.remove('bad'); ui.body.msg = ''; var okm = view.querySelector('.card .ok'); if (okm) okm.remove(); return; }
+    if (kind === 'bdate') { if (validDate(el.value)) ui.body.date = el.value; return; }
+    if (kind === 'btype') { ui.body.filter = el.value; ui.body.limit = 30; ui.body.edit = null; rerender(); return; }
     if (kind === 'sex') { if (currentId() === 'strength') { ui.str.ex = el.value; ui.str.point = null; rerender(); } return; }
     if (currentId() !== 'log') return;
 
@@ -933,7 +1122,7 @@
   function onChange(ev) { // when leaving a field: put back the saved value if the typed one was invalid
     var el = ev.target, kind = el.getAttribute && el.getAttribute('data-in');
     if (kind === 'hex' || kind === 'hfrom' || kind === 'hto') { onHistoryFilter(kind, el); return; }
-    if (kind === 'sex') { onInput(ev); return; }
+    if (kind === 'sex' || kind === 'btype') { onInput(ev); return; }
     if (kind === 'dur' && currentId() === 'log') { var wd = activeWorkout(); if (wd && !parseDuration(el.value).ok) { el.value = num(wd.duration); el.classList.remove('bad'); } return; }
     if ((kind !== 'weight' && kind !== 'reps') || currentId() !== 'log') return;
     var w = activeWorkout(); if (!w) return;

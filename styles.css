@@ -194,3 +194,17 @@ input.bad { border-color: #e07070 !important; }
 .dl-rest { background: #2a312e; }
 .dl-grad { width: 70px !important; border-radius: 6px !important; background: linear-gradient(90deg, rgba(95,191,138,0.3), rgba(95,191,138,1)); }
 .link { background: none; border: 0; color: var(--accent); font: inherit; text-decoration: underline; padding: 6px 4px; cursor: pointer; }
+
+/* ---------- Stage 6: body progress ---------- */
+.two .bf { margin-bottom: 8px; }
+.bf span { display: block; min-height: 2.6em; }
+.big { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.unit { font-size: 16px; font-weight: 500; color: var(--muted); }
+.ok { color: var(--accent); margin: 4px 0 12px; font-weight: 600; }
+.entry { display: flex; align-items: center; gap: 4px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.entry:last-of-type { border-bottom: 0; }
+.entry .grow { flex: 1; min-width: 0; }
+.entry.edit { display: block; }
+.entry.edit .btn { margin-top: 4px; }
+.btn.sm { min-height: 40px; margin: 0; padding: 0 14px; font-size: 15px; }
+.custom-box { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
