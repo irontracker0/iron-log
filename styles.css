@@ -247,3 +247,13 @@ input.bad { border-color: #e07070 !important; }
 .plan-status { min-height: 1.5em; margin: 10px 2px 4px; }
 .plan-foot { justify-content: flex-start; margin: 4px 0 10px; }
 .plan-foot .btn { margin: 0 8px 8px 0; }
+
+/* ---------- Stage 8: dashboard ---------- */
+.row-btn {
+  display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; text-align: left;
+  background: none; border: 0; border-bottom: 1px solid var(--line); padding: 12px 0; color: var(--text);
+  font: inherit; text-decoration: none; cursor: pointer;
+}
+.row-btn:last-child { border-bottom: 0; }
+.row-btn:active { background: var(--accent-soft); }
+.card > .btn-row:first-child { margin-top: 0; }

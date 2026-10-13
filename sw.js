@@ -1,6 +1,6 @@
 // Keeps the app available offline. Change the version number below
 // whenever you update app files, so phones fetch the new versions.
-var CACHE = 'ironlog-shell-v7';
+var CACHE = 'ironlog-shell-v8';
 var FILES = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', function (e) {

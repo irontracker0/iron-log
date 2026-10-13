@@ -92,7 +92,7 @@
   }
 
   /* ================= Screen state (not part of your saved data) ================= */
-  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null }, dashDay: null, body: { ranges: {}, sel: {}, draft: {}, date: '', newCustom: false, edit: null, filter: '', limit: 30, msg: '' } };
+  var ui = { activeId: null, picking: false, noteOpen: {}, search: '', hist: { q: '', ex: '', from: '', to: '' }, histOpen: null, returnTo: null, str: { ex: '', range: '3m', metric: 'weight', point: null }, dashDay: null, dashRange: '30d', body: { ranges: {}, sel: {}, draft: {}, date: '', newCustom: false, edit: null, filter: '', limit: 30, msg: '' } };
   try { var u = JSON.parse(localStorage.getItem(UI_KEY) || '{}'); if (u.activeId) ui.activeId = u.activeId; } catch (e) {}
   function saveUi() { try { localStorage.setItem(UI_KEY, JSON.stringify({ activeId: ui.activeId })); } catch (e) {} }
   function activeWorkout() {
@@ -930,6 +930,111 @@
       '<p class="muted small">Saves automatically as you type. Your plan is separate from workout logging, so logging a workout never changes it. Formatting applies to the text you select.</p>';
   }
 
+  /* ================= Dashboard ================= */
+  var DASH_RANGES = [['7d', '7D', 'Last 7 days', 7], ['30d', '30D', 'Last 30 days', 30], ['90d', '90D', 'Last 90 days', 90], ['1y', '1Y', 'Last year', 365], ['all', 'All', 'All time', 0]];
+  function localIso(d) { d = new Date(d.getTime()); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); }
+  function dashStart(r) {
+    var days = find(DASH_RANGES, function (x) { return x[0] === r; })[3];
+    if (!days) return '';
+    var d = new Date(); d.setDate(d.getDate() - days); return localIso(d);
+  }
+  function weekStart() { var d = new Date(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return localIso(d); } // weeks start on Monday
+  function countSince(iso) { return loggedWorkouts().filter(function (w) { return w.date >= iso; }).length; }
+
+  function strengthChanges(start) {
+    var out = [];
+    db.exercises.forEach(function (e) {
+      var inRange = sessionsFor(e.id).filter(function (se) { return !start || se.date >= start; });
+      if (inRange.length < 2) return;
+      var bw = isBW(e.id), a = sessionStats(inRange[0], bw), z = sessionStats(inRange[inRange.length - 1], bw), from, to, label, unit;
+      if (!bw && a.bestE != null && z.bestE != null) { from = a.bestE; to = z.bestE; label = 'Est. 1RM'; unit = 'kg'; }
+      else if (!bw && a.topW != null && z.topW != null) { from = a.topW; to = z.topW; label = 'Top weight'; unit = 'kg'; }
+      else { from = a.topR; to = z.topR; label = 'Most reps'; unit = 'reps'; }
+      if (!(from > 0)) return;
+      out.push({ exId: e.id, name: e.name, from: from, to: to, label: label, unit: unit, pct: (to - from) / from });
+    });
+    return out.sort(function (x, y) { return y.pct - x.pct; });
+  }
+
+  function recentBodyEntries(n) {
+    var prevOf = {};
+    bodyTypes().forEach(function (t) { var prev = null; entriesFor(t.id).forEach(function (m) { if (prev != null) prevOf[m.id] = prev; prev = m.value; }); });
+    return db.measurements.filter(function (m) { return bodyType(m.type); }).sort(function (a, b) {
+      if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+      return a.createdAt < b.createdAt ? 1 : -1;
+    }).slice(0, n).map(function (m) { return { m: m, t: bodyType(m.type), prev: prevOf[m.id] }; });
+  }
+
+  function dashCount(label, n, hasAny, sub) {
+    return '<div class="card"><div class="stat-label">' + label + '</div><div class="stat-value' + (hasAny ? '' : ' empty') + '">' + (hasAny ? n : 'No data') + '</div>' + (sub ? '<div class="muted small">' + sub + '</div>' : '') + '</div>';
+  }
+
+  function renderDashboard() {
+    var logged = loggedWorkouts(), t = today(), D = ui.dashRange;
+    var latest = logged.slice().sort(byNewest)[0], cont = activeWorkout(), hasAny = logged.length > 0;
+    var html = header('Dashboard', 'Your progress at a glance') +
+      '<div class="btn-row"><a class="btn primary" href="#/log">' + (cont ? 'Continue workout' : 'Log workout') + '</a><a class="btn" href="#/body">Add measurement</a></div>' + renderDots();
+    if (latest) html += '<h2 class="section">Latest workout \u00b7 ' + fmtDate(latest.date) + '</h2>' + strainCardHtml(latest);
+
+    html += '<div class="grid">' + bodyStatCard('weight', 'Body weight') + bodyStatCard('bodyfat', 'Body fat') +
+      dashCount('This week', countSince(weekStart()), hasAny, 'workouts since Monday') +
+      dashCount('This month', countSince(t.slice(0, 7) + '-01'), hasAny, 'workouts in ' + monthLabel(t)) + '</div>' +
+      '<div class="card"><div class="stat-label">Total workouts</div><div class="stat-value' + (hasAny ? '' : ' empty') + '">' + (hasAny ? logged.length : 'None yet') + '</div>' +
+      (hasAny ? '<div class="muted small">since ' + fmtDate(logged.slice().sort(byNewest)[logged.length - 1].date) + '</div>' : '') + '</div>';
+
+    if (!hasAny && !db.measurements.length) {
+      return html + '<div class="card empty-card"><h2>Start tracking</h2><p style="margin:0">Your progress summary, records and trends appear here as soon as you log your first workout or measurement.</p></div>';
+    }
+
+    var start = dashStart(D), label = find(DASH_RANGES, function (x) { return x[0] === D; })[2];
+    html += '<h2 class="section">Progress \u00b7 ' + label + '</h2><div class="chips">' + DASH_RANGES.map(function (r) {
+      return '<button class="chip' + (D === r[0] ? ' active' : '') + '" data-act="drange" data-v="' + r[0] + '">' + r[1] + '</button>';
+    }).join('') + '</div>';
+
+    // summary of the chosen period
+    var inRange = logged.filter(function (w) { return !start || w.date >= start; });
+    var prs = allPRs().filter(function (e) { return !start || e.date >= start; });
+    var rows = '<div class="row"><span>Workouts</span><span class="rv">' + inRange.length + '</span></div>';
+    if (inRange.length) {
+      var sum = 0; inRange.forEach(function (w) { var st = workoutStrain(w); if (st) sum += st.score; });
+      rows += '<div class="row"><span>Average strain</span><span class="rv">' + (sum / inRange.length).toFixed(1) + ' of ' + STRAIN_MAX + '</span></div>';
+    }
+    rows += '<div class="row"><span>New personal records</span><span class="rv">' + prs.length + '</span></div>';
+    [['weight', 'Body weight'], ['bodyfat', 'Body fat']].forEach(function (x) {
+      var pts = bodyDays(x[0]).filter(function (d) { return !start || d.date >= start; }), bt = bodyType(x[0]);
+      if (pts.length > 1) rows += '<div class="row"><span>' + x[1] + '</span><span class="rv">' + fmtN(pts[0].y) + ' to ' + fmtN(pts[pts.length - 1].y) + ' ' + bt.unit + '<br><span class="muted small">' + delta(pts[pts.length - 1].y, pts[0].y, bt.unit) + '</span></span></div>';
+    });
+    html += '<div class="card"><h2>Summary</h2>' + rows + (inRange.length ? '' : '<p class="muted small" style="margin:10px 0 0">No workouts logged in this period.</p>') + '</div>';
+
+    // records
+    html += '<div class="card"><h2>Recent personal records</h2>';
+    if (!prs.length) html += '<p class="muted" style="margin:0">No new records in this period. A record needs an earlier session to beat.</p>';
+    prs.slice(0, 5).forEach(function (e) {
+      html += '<button class="row-btn" data-act="dgo" data-ex="' + esc(e.exId) + '"><span><strong>' + esc(exName(e.exId)) + '</strong><br><span class="muted small">' + shortDate(e.date) + ' \u00b7 ' + esc(e.text) + '</span></span><span class="muted">\u203a</span></button>';
+    });
+    html += '</div>';
+
+    // strength changes
+    var ch = strengthChanges(start);
+    html += '<div class="card"><h2>Strength changes</h2><p class="muted small">First to latest session in this period.</p>';
+    if (!ch.length) html += '<p class="muted" style="margin:0">Log an exercise in at least two sessions in this period to see a change.</p>';
+    ch.slice(0, 5).forEach(function (c) {
+      html += '<button class="row-btn" data-act="dgo" data-ex="' + esc(c.exId) + '"><span><strong>' + esc(c.name) + '</strong><br><span class="muted small">' + c.label + ' ' + fmtVal(c.from) + ' to ' + fmtVal(c.to) + ' ' + c.unit + '</span></span>' +
+        '<span class="' + (c.to >= c.from ? 'ok' : 'muted') + '">' + delta(c.to, c.from, c.unit) + '</span></button>';
+    });
+    html += '</div>';
+
+    // body measurements
+    var rb = recentBodyEntries(5);
+    html += '<div class="card"><h2>Recent measurements</h2>';
+    if (!rb.length) html += '<p class="muted" style="margin:0">No body measurements yet.</p>';
+    rb.forEach(function (x) {
+      html += '<a class="row-btn" href="#/body"><span><strong>' + fmtN(x.m.value) + ' ' + esc(x.t.unit) + '</strong> <span class="muted">' + esc(x.t.name) + '</span><br><span class="muted small">' + shortDate(x.m.date) +
+        (x.prev != null ? ' \u00b7 ' + delta(x.m.value, x.prev, x.t.unit) + ' vs previous' : '') + '</span></span><span class="muted">\u203a</span></a>';
+    });
+    return html + '</div>';
+  }
+
   /* ---------- Workout History ---------- */
   function monthLabel(iso) {
     var p = iso.split('-');
@@ -1029,19 +1134,7 @@
   }
 
   var PAGES = {
-    dashboard: function () {
-      var n = loggedWorkouts().length;
-      var latest = loggedWorkouts().sort(byNewest)[0];
-      return header('Dashboard', 'Your progress at a glance') + renderDots() +
-        (latest ? '<h2 class="section">Latest workout · ' + fmtDate(latest.date) + '</h2>' + strainCardHtml(latest) : '') +
-        '<div class="grid">' +
-          bodyStatCard('weight', 'Body weight') + bodyStatCard('bodyfat', 'Body fat') +
-          '<div class="card"><div class="stat-label">Workouts logged</div><div class="stat-value' + (n ? '' : ' empty') + '">' + (n || 'None yet') + '</div></div>' +
-          '<div class="card"><div class="stat-label">Exercises in library</div><div class="stat-value">' + db.exercises.length + '</div></div>' +
-        '</div>' +
-        '<div class="card empty-card"><h2>Start tracking</h2><p>Your stats appear here as soon as you log your first workout or measurement.</p>' +
-        '<a class="btn primary" href="#/log">Log workout</a><a class="btn" href="#/body">Add measurement</a></div>';
-    },
+    dashboard: function () { return renderDashboard(); },
     log: function () { var w = activeWorkout(); return w ? renderEditor(w) : renderLogHome(); },
     strength: function () { return renderStrength(); },
     body: function () { return renderBody(); },
@@ -1059,7 +1152,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 7: my plan</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 8: dashboard</span></div>' +
         '</div>';
     }
   };
@@ -1150,6 +1243,8 @@
     if (currentId() === 'dashboard') {
       if (act === 'dday') { var dd = btn.getAttribute('data-d'); ui.dashDay = ui.dashDay === dd ? null : dd; rerender(); }
       else if (act === 'dopen') { ui.histOpen = btn.getAttribute('data-id'); location.hash = '#/history'; }
+      else if (act === 'drange') { ui.dashRange = btn.getAttribute('data-v'); rerender(); }
+      else if (act === 'dgo') { ui.str.ex = btn.getAttribute('data-ex'); ui.str.point = null; location.hash = '#/strength'; }
       return;
     }
     if (currentId() !== 'log') return;
