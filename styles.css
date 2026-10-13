@@ -208,3 +208,42 @@ input.bad { border-color: #e07070 !important; }
 .entry.edit .btn { margin-top: 4px; }
 .btn.sm { min-height: 40px; margin: 0; padding: 0 14px; font-size: 15px; }
 .custom-box { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+
+/* ---------- Stage 7: My Plan ---------- */
+.plan-bar {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10;
+  display: flex; align-items: center; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding: 8px 6px; margin: 0 -6px 12px; background: rgba(12, 15, 14, 0.94);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-bottom: 1px solid var(--line);
+}
+.tb {
+  flex: none; min-width: 44px; min-height: 44px; padding: 0 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text);
+  font: inherit; font-size: 16px; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tb.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.tb svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tb-sep { flex: none; width: 1px; height: 28px; background: var(--line); margin: 0 4px; }
+.tb.sw { padding: 0; }
+.tb.sw i { display: block; width: 24px; height: 24px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.2); }
+.plan-editor {
+  min-height: 55vh; padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  font-size: 17px; line-height: 1.55; outline: none; caret-color: var(--accent); overflow-wrap: anywhere;
+  -webkit-user-select: text; user-select: text;
+}
+.plan-editor:focus { border-color: var(--accent); }
+.plan-editor.is-empty::before { content: attr(data-placeholder); color: var(--muted); pointer-events: none; position: absolute; }
+.plan-editor h2 { font-size: 26px; line-height: 1.2; margin: 18px 0 8px; letter-spacing: -0.01em; }
+.plan-editor h3 { font-size: 20px; line-height: 1.25; margin: 14px 0 6px; }
+.plan-editor h2:first-child, .plan-editor h3:first-child { margin-top: 0; }
+.plan-editor p, .plan-editor div { margin: 0 0 8px; }
+.plan-editor ul, .plan-editor ol { margin: 0 0 8px; padding-left: 26px; }
+.plan-editor li { margin: 2px 0; }
+.plan-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 12px 0 6px; flex-wrap: wrap; }
+.plan-foot .btn { margin: 0 0 0 8px; }
+
+/* status text sits on its own line so changing it never moves the buttons */
+.plan-status { min-height: 1.5em; margin: 10px 2px 4px; }
+.plan-foot { justify-content: flex-start; margin: 4px 0 10px; }
+.plan-foot .btn { margin: 0 8px 8px 0; }

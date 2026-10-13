@@ -749,6 +749,187 @@
     } else if (act === 'bmore') { B.limit += 30; rerender(); }
   }
 
+  /* ================= My Plan (rich-text notebook) ================= */
+  var SIZE_KW = ['x-small', 'small', 'medium', 'large', 'x-large', 'xx-large', 'xxx-large'];
+  var PLAN_COLORS = [['Default', '#e9efeb'], ['Green', '#5fbf8a'], ['Yellow', '#e0b45a'], ['Orange', '#f0985a'], ['Red', '#f07a7a'], ['Blue', '#6aa8ff'], ['Purple', '#b58cf0'], ['Grey', '#9aa6a0']];
+  var planEl = null, planTimer = null, planRange = null, planStatusTimer = null;
+
+  // Everything pasted or loaded goes through this cleaner: only simple formatting survives, nothing that could run code.
+  var DROP = { SCRIPT: 1, STYLE: 1, META: 1, TITLE: 1, HEAD: 1, LINK: 1, IFRAME: 1, OBJECT: 1, EMBED: 1, SVG: 1, IMG: 1, VIDEO: 1, AUDIO: 1, CANVAS: 1, TEMPLATE: 1, NOSCRIPT: 1, FORM: 1, INPUT: 1, BUTTON: 1, SELECT: 1, TEXTAREA: 1 };
+  var BLOCK = { P: 'p', DIV: 'div', H1: 'h2', H2: 'h2', H3: 'h3', H4: 'h3', H5: 'h3', H6: 'h3', UL: 'ul', OL: 'ol', LI: 'li', TR: 'p', BLOCKQUOTE: 'div', PRE: 'div' };
+  var INLINE = { B: 'b', STRONG: 'b', I: 'i', EM: 'i', U: 'u' };
+
+  function sizeFromCss(v) {
+    v = (v || '').trim().toLowerCase();
+    if (v === '-webkit-xxx-large') return 'xxx-large';
+    if (SIZE_KW.indexOf(v) > -1) return v === 'medium' ? null : v;
+    var m = /^([\d.]+)(px|pt)$/.exec(v);
+    if (!m) return null;
+    var px = parseFloat(m[1]) * (m[2] === 'pt' ? 1.333 : 1);
+    return px <= 11 ? 'x-small' : px <= 13 ? 'small' : px <= 17 ? null : px <= 20 ? 'large' : px <= 26 ? 'x-large' : px <= 34 ? 'xx-large' : 'xxx-large';
+  }
+  function colorFromCss(v) {
+    if (!v) return null;
+    var t = document.createElement('span'); t.style.color = v;
+    var c = t.style.color, m = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c);
+    if (!m) return null;
+    var lin = function (v) { v = v / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    var lum = 0.2126 * lin(+m[1]) + 0.7152 * lin(+m[2]) + 0.0722 * lin(+m[3]);
+    return (lum + 0.05) / 0.061 < 3 ? null : c; // too little contrast on the dark background (pasted black text, for example): drop it
+  }
+  function cleanInto(src, out) {
+    Array.prototype.forEach.call(src.childNodes, function (ch) {
+      if (ch.nodeType === 3) { out.appendChild(document.createTextNode(ch.nodeValue)); return; }
+      if (ch.nodeType !== 1 || DROP[ch.tagName]) return;
+      if (ch.tagName === 'BR') { out.appendChild(document.createElement('br')); return; }
+      var target = out;
+      function wrap(name, style) { var e = document.createElement(name); if (style) e.setAttribute('style', style); target.appendChild(e); target = e; }
+      if (BLOCK[ch.tagName]) wrap(BLOCK[ch.tagName]);
+      else if (INLINE[ch.tagName]) wrap(INLINE[ch.tagName]);
+      var st = ch.style || {};
+      if (st.fontWeight === 'bold' || parseInt(st.fontWeight, 10) >= 600) wrap('b');
+      if (st.fontStyle === 'italic') wrap('i');
+      if ((st.textDecorationLine || st.textDecoration || '').indexOf('underline') > -1) wrap('u');
+      var col = colorFromCss(st.color || (ch.tagName === 'FONT' ? ch.getAttribute('color') : ''));
+      var sz = sizeFromCss(st.fontSize);
+      if (!sz && ch.tagName === 'FONT' && ch.getAttribute('size')) sz = sizeFromCss(SIZE_KW[Math.max(0, Math.min(6, parseInt(ch.getAttribute('size'), 10) - 1))]);
+      var css = (col ? 'color: ' + col + ';' : '') + (sz ? ' font-size: ' + sz + ';' : '');
+      if (css) wrap('span', css.trim());
+      cleanInto(ch, target);
+    });
+  }
+  function sanitizeHtml(html) {
+    var doc = new DOMParser().parseFromString('<body>' + html + '</body>', 'text/html'), out = document.createElement('div');
+    cleanInto(doc.body, out);
+    return out.innerHTML;
+  }
+  function textToHtml(t) {
+    return t.replace(/\r\n?/g, '\n').split('\n').map(function (l) { return '<p>' + (l ? esc(l) : '<br>') + '</p>'; }).join('');
+  }
+
+  function timeLabel(iso) { return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+  function setPlanStatus(t, temp) {
+    var el = document.getElementById('plan-status'); if (!el) return;
+    el.textContent = t;
+    clearTimeout(planStatusTimer);
+    if (temp) planStatusTimer = setTimeout(function () { el.textContent = db.planUpdatedAt ? 'Saved ' + timeLabel(db.planUpdatedAt) : 'Nothing saved yet'; }, 2500);
+  }
+  function isPlanEmpty() { return !planEl.textContent.trim() && !planEl.querySelector('li'); }
+  function updatePlanEmpty() { planEl.classList.toggle('is-empty', isPlanEmpty()); }
+
+  function planDirty() { setPlanStatus('Saving...'); clearTimeout(planTimer); planTimer = setTimeout(flushPlan, 400); }
+  function flushPlan() {
+    clearTimeout(planTimer); planTimer = null;
+    if (!planEl || !document.body.contains(planEl)) return;
+    var html = isPlanEmpty() ? '' : planEl.innerHTML;
+    if (html !== (db.plan || '')) {
+      var before = db.plan, beforeAt = db.planUpdatedAt;
+      db.plan = html; db.planUpdatedAt = new Date().toISOString();
+      if (!save()) { db.plan = before; db.planUpdatedAt = beforeAt; setPlanStatus(loadError ? 'Saving is paused: saved data could not be read.' : 'Could not save. Try Copy to keep your text.'); return; }
+    }
+    setPlanStatus(db.planUpdatedAt ? 'Saved ' + timeLabel(db.planUpdatedAt) : 'Nothing saved yet');
+  }
+
+  function onSelChange() {
+    if (!planEl || !document.body.contains(planEl)) return;
+    var sel = window.getSelection();
+    if (sel.rangeCount && planEl.contains(sel.anchorNode)) { planRange = sel.getRangeAt(0).cloneRange(); updateToolbarState(); }
+  }
+  function restoreSel() {
+    var had = document.activeElement === planEl;
+    if (!had) planEl.focus();
+    if (!had && planRange) { var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(planRange); }
+  }
+  function planCmd(cmd, val) {
+    if (!planEl) return;
+    restoreSel();
+    try { document.execCommand('styleWithCSS', false, cmd === 'foreColor' || cmd === 'fontSize'); } catch (e) {}
+    document.execCommand(cmd, false, val == null ? null : val);
+    updatePlanEmpty(); planDirty(); updateToolbarState();
+  }
+  function updateToolbarState() {
+    var bar = document.getElementById('plan-toolbar'); if (!bar) return;
+    var block = '';
+    try { block = (document.queryCommandValue('formatBlock') || '').toLowerCase().replace(/[<>]/g, ''); } catch (e) {}
+    Array.prototype.forEach.call(bar.querySelectorAll('[data-cmd]'), function (b) {
+      var c = b.getAttribute('data-cmd'), v = b.getAttribute('data-val'), on = false;
+      try {
+        if (c === 'bold' || c === 'italic' || c === 'underline' || c === 'insertUnorderedList' || c === 'insertOrderedList') on = document.queryCommandState(c);
+        else if (c === 'formatBlock') on = v === block || (v === 'p' && (block === 'div' || block === 'p' || block === ''));
+      } catch (e) {}
+      b.classList.toggle('on', !!on);
+    });
+  }
+
+  function onPlanPaste(ev) {
+    ev.preventDefault();
+    var cd = ev.clipboardData; if (!cd) return;
+    var html = cd.getData('text/html'), text = cd.getData('text/plain');
+    var out = html ? sanitizeHtml(html) : '';
+    if (!out && text) out = textToHtml(text);
+    if (out) document.execCommand('insertHTML', false, out);
+  }
+
+  function initPlan() {
+    planEl = document.getElementById('plan-editor');
+    if (!planEl) return;
+    planEl.innerHTML = db.plan ? sanitizeHtml(db.plan) : '';
+    updatePlanEmpty();
+    try { document.execCommand('defaultParagraphSeparator', false, 'p'); } catch (e) {}
+    setPlanStatus(loadError ? 'Saving is paused: saved data could not be read.' : (db.planUpdatedAt ? 'Saved ' + timeLabel(db.planUpdatedAt) : 'Nothing saved yet'));
+    planEl.addEventListener('input', function () { updatePlanEmpty(); planDirty(); });
+    planEl.addEventListener('paste', onPlanPaste);
+    planEl.addEventListener('drop', function (e) { e.preventDefault(); });
+    planEl.addEventListener('blur', flushPlan);
+  }
+
+  function copyPlan() {
+    var html = planEl.innerHTML, text = planEl.innerText;
+    function plain() {
+      if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+      return Promise.reject(new Error('no clipboard'));
+    }
+    var p = (navigator.clipboard && window.ClipboardItem)
+      ? navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) })]).catch(plain)
+      : plain();
+    p.then(function () { setPlanStatus('Copied. Paste it anywhere.', true); }, function () { setPlanStatus('Copy was blocked. Select the text and copy it manually.', true); });
+  }
+  function downloadPlan() {
+    var doc = '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>My Plan</title>' +
+      '<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0c0f0e;color:#e9efeb;max-width:720px;margin:0 auto;padding:24px;line-height:1.55}h2{font-size:26px}h3{font-size:20px}</style></head><body>' + planEl.innerHTML + '</body></html>';
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([doc], { type: 'text/html' }));
+    a.download = 'ironlog-plan-' + today() + '.html'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1500);
+    setPlanStatus('Downloaded as a file.', true);
+  }
+  function onPlanClick(act, btn) {
+    if (act === 'pcmd') planCmd(btn.getAttribute('data-cmd'), btn.getAttribute('data-val'));
+    else if (act === 'pcopy') copyPlan();
+    else if (act === 'pdownload') downloadPlan();
+  }
+
+  function tb(label, cmd, val, title) {
+    return '<button type="button" class="tb" data-act="pcmd" data-cmd="' + cmd + '"' + (val != null ? ' data-val="' + val + '"' : '') + ' aria-label="' + title + '" title="' + title + '">' + label + '</button>';
+  }
+  function renderPlan() {
+    var svg = function (d) { return '<svg viewBox="0 0 24 24" aria-hidden="true">' + d + '</svg>'; };
+    var sep = '<span class="tb-sep"></span>';
+    var bar = tb(svg('<path d="M1 4v6h6"/><path d="M3.5 15a9 9 0 1 0 2.1-9.4L1 10"/>'), 'undo', null, 'Undo') +
+      tb(svg('<path d="M23 4v6h-6"/><path d="M20.5 15a9 9 0 1 1-2.1-9.4L23 10"/>'), 'redo', null, 'Redo') + sep +
+      tb('Text', 'formatBlock', 'p', 'Normal text') + tb('Heading', 'formatBlock', 'h2', 'Heading') + tb('Sub', 'formatBlock', 'h3', 'Subheading') + sep +
+      tb('<b>B</b>', 'bold', null, 'Bold') + tb('<i>I</i>', 'italic', null, 'Italic') + tb('<u>U</u>', 'underline', null, 'Underline') + sep +
+      tb(svg('<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>'), 'insertUnorderedList', null, 'Bullet list') + tb('1.', 'insertOrderedList', null, 'Numbered list') + sep +
+      tb('S', 'fontSize', '2', 'Small text') + tb('M', 'fontSize', '3', 'Normal size') + tb('L', 'fontSize', '5', 'Large text') + tb('XL', 'fontSize', '6', 'Extra large text') + sep +
+      PLAN_COLORS.map(function (c) { return '<button type="button" class="tb sw" data-act="pcmd" data-cmd="foreColor" data-val="' + c[1] + '" aria-label="Text colour: ' + c[0] + '" title="' + c[0] + '"><i style="background:' + c[1] + '"></i></button>'; }).join('') + sep +
+      tb('Clear', 'removeFormat', null, 'Clear formatting');
+    return header('My Plan', 'Your personal workout notebook') +
+      '<div class="plan-bar" id="plan-toolbar" role="toolbar" aria-label="Formatting">' + bar + '</div>' +
+      '<div id="plan-editor" class="plan-editor is-empty" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Workout plan" data-placeholder="Write or paste your workout plan here" spellcheck="true"></div>' +
+      '<p id="plan-status" class="muted small plan-status"></p>' +
+      '<div class="plan-foot"><button class="btn" data-act="pcopy">Copy</button><button class="btn" data-act="pdownload">Download</button></div>' +
+      '<p class="muted small">Saves automatically as you type. Your plan is separate from workout logging, so logging a workout never changes it. Formatting applies to the text you select.</p>';
+  }
+
   /* ---------- Workout History ---------- */
   function monthLabel(iso) {
     var p = iso.split('-');
@@ -865,7 +1046,7 @@
     strength: function () { return renderStrength(); },
     body: function () { return renderBody(); },
     history: function () { return renderHistory(); },
-    plan: function () { return comingSoon('My Plan', 'Your personal workout notebook', 'Stage 7', 'A free-form editor with formatting and automatic saving.'); },
+    plan: function () { return renderPlan(); },
     settings: function () {
       var t = db.createdAt ? db.createdAt.slice(0, 10) : '-';
       return header('Settings and Backups', 'Storage and data safety') +
@@ -878,7 +1059,7 @@
           '<div class="row"><span>Measurements stored</span><span>' + db.measurements.length + '</span></div>' +
           '<div class="row"><span>Data created</span><span>' + t + '</span></div>' +
           '<div class="row"><span>Protected storage</span><span id="persist-status">checking...</span></div>' +
-          '<div class="row"><span>App version</span><span>Stage 6: body progress</span></div>' +
+          '<div class="row"><span>App version</span><span>Stage 7: my plan</span></div>' +
         '</div>';
     }
   };
@@ -917,6 +1098,7 @@
 
   function route() {
     var id = currentId();
+    flushPlan(); planEl = null; planRange = null;
     toggleSheet(false);
     ui.picking = false; ui.search = '';
     if (id !== 'history' && !ui.returnTo) ui.histOpen = null;
@@ -924,6 +1106,7 @@
     renderTabs(id);
     window.scrollTo(0, 0);
     if (id === 'settings') showPersistStatus();
+    if (id === 'plan') initPlan();
   }
 
   function rerender() { // redraw the current page but keep the scroll position
@@ -963,6 +1146,7 @@
     if (currentId() === 'history') { onHistoryClick(act, btn); return; }
     if (currentId() === 'strength') { onStrengthClick(act, btn); return; }
     if (currentId() === 'body') { onBodyClick(act, btn); return; }
+    if (currentId() === 'plan') { onPlanClick(act, btn); return; }
     if (currentId() === 'dashboard') {
       if (act === 'dday') { var dd = btn.getAttribute('data-d'); ui.dashDay = ui.dashDay === dd ? null : dd; rerender(); }
       else if (act === 'dopen') { ui.histOpen = btn.getAttribute('data-id'); location.hash = '#/history'; }
@@ -1132,6 +1316,10 @@
     if (!r.ok) { el.value = num(s[kind]); el.classList.remove('bad'); }
   }
 
+  document.addEventListener('selectionchange', onSelChange);
+  document.addEventListener('visibilitychange', function () { if (document.hidden) flushPlan(); });
+  window.addEventListener('pagehide', flushPlan);
+  view.addEventListener('mousedown', function (ev) { if (ev.target.closest && ev.target.closest('#plan-toolbar')) ev.preventDefault(); });
   view.addEventListener('click', onClick);
   view.addEventListener('input', onInput);
   view.addEventListener('change', onChange);
